@@ -284,4 +284,32 @@ plot(vals_df$covered_size, vals_df$dir_concentration,
      xlab = "Covered demand (sum size)",
      ylab = "Direction concentration",
      main = "Random solutions: coverage vs direction concentration")
+# rebuild pareto_df
+F <- res$value
+pareto_df <- data.frame(
+  covered_demand = -F[,1],
+  dir_concentration = -F[,2]
+)
+
+summary(pareto_df)
+
+# knee detection
+x <- pareto_df$covered_demand
+y <- pareto_df$dir_concentration
+
+x_n <- (x - min(x)) / (max(x) - min(x))
+y_n <- (y - min(y)) / (max(y) - min(y))
+
+dist <- sqrt((1 - x_n)^2 + (1 - y_n)^2)
+knee_idx <- which.min(dist)
+
+knee_idx
+pareto_df[knee_idx, ]
+
+# selected clusters
+x_knee <- as.integer(res$par[knee_idx, ] > 0.5)
+selected_clusters <- moo_clusters$cluster[x_knee == 1]
+
+length(selected_clusters)
+selected_clusters
 
