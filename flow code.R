@@ -92,17 +92,18 @@ library(dplyr)
 
 # berlin is your data.frame
 
+# new code for structural correction
 X <- berlin %>%
-  dplyr::select(x_o, y_o, x_d, y_d) %>%
+  dplyr::select(x_o, y_o, dx, dy) %>%
   as.matrix()
+
+ok <- complete.cases(X)
+X_scaled <- scale(X[ok, , drop = FALSE])
+berlin_clean <- berlin[ok, ]
 
 # standardize (mean 0, sd 1)
 X_scaled <- scale(X)
 
-ok <- stats::complete.cases(X)
-if (!all(ok)) {
-  message("Removed ", sum(!ok), " rows with NA in (x_o,y_o,x_d,y_d).")
-}
 X <- X[ok, , drop = FALSE]
 berlin_clean <- berlin[ok, , drop = FALSE]
 X_scaled <- scale(X)
@@ -122,18 +123,165 @@ for (k in k_values) {
 }
 
 par(old_par)
-eps_grid <- c(0.5, 0.6, 0.7)
-k_grid   <- c(15, 20, 30)
-results <- list()
+eps_grid <- c(0.2, 0.3, 0.4, 0.5, 0.6)
+k_grid   <- c(20, 30, 50)
 
+# new parameter search with adjusted eps
+results <- list()
 idx <- 1
+
 for (k in k_grid) {
   for (eps_val in eps_grid) {
+
     db <- dbscan(X_scaled, eps = eps_val, minPts = k)
     cl <- db$cluster
-    
+
     n_noise <- sum(cl == 0)
     noise_pct <- 100 * n_noise / length(cl)
     n_clusters <- length(unique(cl[cl != 0]))
-max_cluster_size <- if (n_clusters > 0) max(table(cl[cl != 0])) else 0
-max_cluster_pct  <- if (n_clusters > 0) 100 * max_cluster_size / length(cl) else 0
+
+    max_cluster_size <- if (n_clusters > 0) max(table(cl[cl != 0])) else 0
+    max_cluster_pct  <- if (n_clusters > 0) 100 * max_cluster_size / length(cl) else 0
+
+    results[[idx]] <- data.frame(
+      minPts = k,
+      eps = eps_val,
+      n_clusters = n_clusters,
+      noise_pct = noise_pct,
+      max_cluster_pct = max_cluster_pct
+    )
+
+    idx <- idx + 1
+  }
+}
+
+grid_df <- dplyr::bind_rows(results)
+print(grid_df)
+
+# Recommended final choice 
+minPts = 30
+eps    = 0.2
+
+# backup choice
+minPts = 50
+eps    = 0.2
+
+eps_star <- 0.2
+minPts_star <- 30
+# Final DBSCAN run
+db_final <- dbscan(X_scaled, eps = eps_star, minPts = minPts_star)
+
+berlin_clean$cluster <- db_final$cluster  # 0 = noise
+
+# Verify the final clustering
+table(berlin_clean$cluster)[1:10]
+
+# cluster summary
+cluster_summary <- berlin_clean %>%
+  filter(cluster != 0) %>%          # exclude noise
+  group_by(cluster) %>%
+  summarise(
+    size = n(),
+    mean_x_o = mean(x_o),
+    mean_y_o = mean(y_o),
+    mean_dx  = mean(dx),
+    mean_dy  = mean(dy),
+    mean_len = mean(len, na.rm = TRUE),
+    mean_duration = mean(duration, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(size))
+
+print(head(cluster_summary, 15))
+
+# excluding cluster 1
+moo_clusters <- cluster_summary %>%
+  dplyr::filter(cluster >= 2)
+
+nrow(moo_clusters)
+
+# vector of cluster IDs
+cluster_ids <- moo_clusters$cluster
+K <- length(cluster_ids)
+K
+
+# Unit direction vectors
+v <- as.matrix(moo_clusters[, c("mean_dx", "mean_dy")])
+norms <- sqrt(rowSums(v^2))
+# avoid divide-by-zero (shouldn't happen if len>0, but safe)
+norms[norms == 0] <- 1
+u <- v / norms
+
+# Cosine similarity matrix (K x K)
+S <- u %*% t(u)
+diag(S) <- NA  # ignore self-similarity
+
+# weighted direction concentration
+dir_concentration_weighted <- function(sel, u, w) {
+  if (length(sel) < 2) return(0)
+  ww <- w[sel] / sum(w[sel])
+  m <- colSums(u[sel, , drop = FALSE] * ww)
+  sqrt(sum(m^2))
+}
+# evaluation function
+eval_solution <- function(x, df, u) {
+  sel <- which(x == 1)
+
+  total_size <- sum(df$size[sel])
+  f1 <- -total_size
+
+  dir_conc <- dir_concentration_weighted(sel, u, df$size)
+
+  # Penalize selecting fewer than 2 clusters
+  if (length(sel) < 2) {
+    f2 <- 1   # worst (since we minimize)
+  } else {
+    f2 <- -dir_conc
+  }
+
+  c(f1_neg_size = f1,
+    f2_neg_dir_concentration = f2)
+}
+
+eval_solution(x, moo_clusters, u)
+
+eval_solution(rep(0, K), moo_clusters, u)
+eval_solution(rep(1, K), moo_clusters, u)
+
+K <- nrow(moo_clusters)
+
+# select none
+eval_solution(rep(0, K), moo_clusters, u)
+
+# select all
+eval_solution(rep(1, K), moo_clusters, u)
+# sanity check
+set.seed(1)
+for (i in 1:5) {
+  x <- rbinom(K, 1, 0.2)
+  print(eval_solution(x, moo_clusters, u))
+}
+
+# random sampling check
+set.seed(1)
+N <- 500
+
+vals <- matrix(NA, nrow = N, ncol = 2)
+
+for (i in 1:N) {
+  x <- rbinom(K, 1, 0.2)
+  vals[i, ] <- eval_solution(x, moo_clusters, u)
+}
+
+vals_df <- data.frame(
+  covered_size = -vals[,1],
+  dir_concentration = -vals[,2]
+)
+
+summary(vals_df)
+# ploting it
+plot(vals_df$covered_size, vals_df$dir_concentration,
+     xlab = "Covered demand (sum size)",
+     ylab = "Direction concentration",
+     main = "Random solutions: coverage vs direction concentration")
+
