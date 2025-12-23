@@ -1,4 +1,4 @@
-install.packages(c("data.table"))  # run once if not installed
+ install.packages(c("data.table"))  # run once if not installed
 library(data.table)
 
 berlin <- readRDS("dt_bolt_berlin_06_05.rds")
@@ -314,4 +314,93 @@ length(selected_clusters)
 selected_clusters
 
 
+# same as above
+x_knee <- as.integer(res$par[knee_idx, ] > 0.5)
+clusters_knee <- moo_clusters$cluster[x_knee == 1]
 
+clusters_knee
+length(clusters_knee)
+
+# gives extrems and knee solution
+best_dir_idx <- which.max(pareto_df$dir_concentration)
+best_cov_idx <- which.max(pareto_df$covered_demand)
+
+pareto_df[best_dir_idx, ]
+pareto_df[best_cov_idx, ]
+pareto_df[knee_idx, ]
+
+# pareto solutions for abjectives
+decode_solution <- function(sol_idx, res, moo_clusters) {
+  x_bin <- as.integer(res$par[sol_idx, ] > 0.5)
+  moo_clusters$cluster[x_bin == 1]
+}
+
+clusters_best_dir <- decode_solution(best_dir_idx, res, moo_clusters)
+clusters_best_cov <- decode_solution(best_cov_idx, res, moo_clusters)
+clusters_knee     <- decode_solution(knee_idx, res, moo_clusters)
+
+length(clusters_best_dir); clusters_best_dir
+length(clusters_best_cov); clusters_best_cov
+length(clusters_knee);     clusters_knee
+
+# Create a comparison table for the three solutions
+make_solution_table <- function(selected, cluster_summary) {
+  cluster_summary %>%
+    dplyr::filter(cluster %in% selected) %>%
+    dplyr::select(cluster, size, mean_dx, mean_dy, mean_len, mean_duration) %>%
+    dplyr::arrange(dplyr::desc(size))
+}
+
+tab_best_dir <- make_solution_table(clusters_best_dir, cluster_summary)
+tab_knee     <- make_solution_table(clusters_knee, cluster_summary)
+tab_best_cov <- make_solution_table(clusters_best_cov, cluster_summary)
+
+head(tab_best_dir, 10)
+head(tab_knee, 10)
+head(tab_best_cov, 10)
+
+# map the knee solution
+library(ggplot2)
+
+plot_df <- cluster_summary %>%
+  dplyr::filter(cluster %in% clusters_knee) %>%
+  mutate(
+    x1 = mean_x_o,
+    y1 = mean_y_o,
+    x2 = mean_x_o + mean_dx,
+    y2 = mean_y_o + mean_dy
+  )
+
+ggplot(plot_df) +
+  geom_segment(
+    aes(x = x1, y = y1, xend = x2, yend = y2, linewidth = size),
+    arrow = arrow(length = unit(0.15, "cm"))
+  ) +
+  scale_linewidth_continuous(range = c(0.3, 1.5)) +
+  labs(
+    title = "Knee solution: selected flow corridors",
+    x = "x", y = "y"
+  )
+
+# better map
+# Normalize arrow length (optional)
+scale_factor <- 0.5
+
+plot_df <- plot_df %>%
+  mutate(
+    x2 = mean_x_o + scale_factor * mean_dx,
+    y2 = mean_y_o + scale_factor * mean_dy
+  )
+
+#Fix aspect ratio (important for maps)
+ggplot(plot_df) +
+  geom_segment(
+    aes(x = x1, y = y1, xend = x2, yend = y2, linewidth = size),
+    arrow = arrow(length = unit(0.15, "cm"))
+  ) +
+  coord_equal() +
+  scale_linewidth_continuous(range = c(0.3, 1.5)) +
+  labs(
+    title = "Knee solution: selected flow corridors",
+    x = "Easting (m)", y = "Northing (m)"
+  )
