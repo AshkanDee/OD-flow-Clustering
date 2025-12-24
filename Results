@@ -1,3 +1,85 @@
+# filtering  data frame  to retain only rows with valid geographic coordinates for start and destination locations.
+Purpose
+
+This is a sanity check / data cleaning step to ensure that all coordinates fall within the valid ranges for latitude and longitude:
+
+Latitude must be in [-90, 90]
+
+Longitude must be in [-180, 180]
+Why It's Important
+
+You’re likely working with GPS or geospatial data.
+
+Invalid or corrupted coordinates (e.g., 9999, -999, NaN) can cause problems in:
+
+Mapping
+
+Clustering
+
+Distance calculations
+
+Spatial analyses
+
+# Create sf objects for origin and destination by tell R that your coordinates are WGS84 (EPSG:4326).
+
+# Project to metric CRS (Germany) Use ETRS89 / UTM zone 32N (EPSG:25832). Now coordinates are in meters.
+Originally:
+
+Your coordinates were in degrees (latitude, longitude).
+
+Degrees are not distances:
+
+1° longitude ≠ constant distance
+
+Angles and lengths are meaningless in degrees
+
+So we projected all points to:
+
+ETRS89 / UTM Zone 32N (EPSG:25832)
+
+Units = meters
+
+Why this matters for your project:
+
+Clustering relies on distances
+
+Direction similarity relies on angles
+
+Both are only meaningful in a metric space
+
+Without projection:
+
+“direction similarity” would be physically wrong
+
+clusters would be distorted by latitude
+"In addition to the original trip attributes, we derived a geometric representation of OD flows by projecting coordinates to a metric CRS and computing displacement vectors,
+directions, and lengths. These derived variables are used exclusively for spatial clustering and evaluation.”
+
+# Compute flow vector components + angle + length
+dt[, `:=`(
+  dx = x_d - x_o,
+  dy = y_d - y_o,
+  angle = atan2(dy, dx),              # radians, range [-pi, pi]
+  len = sqrt(dx^2 + dy^2)              # length in meters
+)]
+Represented each trip as a flow vector
+
+Each OD trip is now a vector:
+𝑣⃗=(𝑥𝑑−𝑥𝑜,𝑦𝑑−𝑦𝑜)v=(xd−xo,yd−yo)
+
+We computed:
+
+dx, dy → direction and displacement
+
+len → trip length in meters
+
+angle = atan2(dy, dx) → direction in radians
+We changed metrics so that “similarity”, “direction”, and “distance” mean what they should in the real world.
+
+“We first establish a baseline multi-objective OD flow clustering pipeline using Euclidean flow representations,
+and subsequently extend it to a network-constrained distance model to better reflect real-world movement.”
+
+
 # berlin results of grid search
 minPts   eps       n_clusters noise_pct     max_cluster_pct
 1      20 0.2         81     32.377742        65.87999
@@ -82,6 +164,15 @@ It gives:
 as they represent unclustered or background behaviors. Subsequent analyses focus on clusters 2 and above, 
 which reflect meaningful and diverse movement patterns.”
 
+# One line you can safely write in your methodology
+
+“The multi-objective optimization simultaneously maximizes the total number of OD flows represented by the selected clusters and their weighted directional coherence,
+while enforcing a minimum structural diversity constraint.”
+How to state this explicitly in your methodology (copy-ready)
+
+“Directional similarity was computed as a demand-weighted measure to ensure consistency with the coverage objective and to reflect the dominant mobility demand captured by each solution.
+As a robustness check, we also evaluated a normalized variant in which all clusters contribute equally, yielding qualitatively similar trade-offs (see Appendix X).”
+
 # evaluation function results
              f1_neg_size f2_neg_dir_concentration 
             -495.0000000               -0.5919627 
@@ -102,6 +193,8 @@ which reflect meaningful and diverse movement patterns.”
  Mean   : 711.4   Mean   :0.401704  
  3rd Qu.: 745.2   3rd Qu.:0.595075  
  Max.   :2006.0   Max.   :0.883416  
+
+I Used abs(cosine) so opposite directions are treated as similar (same axis).
 
 Descriptive Statistics
 1. covered_size (Cluster Significance)
@@ -369,6 +462,39 @@ It was detected as the knee based on its balanced score
 "Based on directional and size-based filtering, 25 clusters were selected from the DBSCAN output.
 This subset achieved a covered demand of 2,468 and a direction concentration of 0.731.
 Among all Pareto-optimal solutions, this point was identified as the knee solution, offering the best trade-off between cluster coverage and directional homogeneity."
+
+#about DBVC as CVI
+DBVC Evaluation and Suitability
+
+As part of our cluster validation process, we experimented with the Density-Based Validity Criterion (DBVC)
+to assess the quality of clusters selected via our multi-objective optimization approach.
+In our scenario, clusters were selected through multi-objective optimization with the aim of maximizing covered demand and directional similarity.
+This process naturally results in:
+
+A highly imbalanced cluster size distribution, where a few large clusters coexist with many smaller ones,
+
+Some clusters intentionally chosen for their domain-relevant patterns despite being small in size,
+
+A subset of the data being classified as noise or excluded clusters to preserve meaningful structure.
+
+We tested DBVC on a sample of 10,000 to 20,000 points, with various configurations, including filtering out clusters smaller than 10 points. 
+Despite this, the DBVC scores remained consistently low (e.g., -0.75, -0.60), reflecting:
+
+The presence of one or more dominant clusters (e.g., a single cluster holding >90% of points),
+
+Numerous small or sparse clusters (even after filtering),
+
+And a significant portion of data excluded or labeled as noise (e.g., 70%+ noise rate in some configurations).
+
+Interpretation and Conclusion
+
+While DBVC is useful in conventional clustering contexts, it proved less suitable for our objectives due to the following reasons:
+
+The deliberate imbalance in cluster sizes is a feature, not a flaw, of our cluster selection process.
+
+DBVC does not account for application-specific criteria like demand coverage or directionality.
+
+It penalizes configurations that are functionally optimal but statistically atypical.
 
 # performance results(Compare knee with two extremes) 
 A data.frame: 1 × 2
