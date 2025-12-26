@@ -158,12 +158,17 @@ for (k in k_grid) {
 grid_df <- dplyr::bind_rows(results)
 print(grid_df)
 
-# Recommended final choice 
+# Recommended Berlin choice 
 minPts = 30
 eps    = 0.2
 
-# backup choice
-minPts = 50
+# Cologne choice
+minPts = 30
+eps    = 0.3
+
+
+# Munich choice
+minPts = 20
 eps    = 0.2
 
 eps_star <- 0.2
@@ -404,3 +409,4 @@ ggplot(plot_df) +
     title = "Knee solution: selected flow corridors",
     x = "Easting (m)", y = "Northing (m)"
   )
+
