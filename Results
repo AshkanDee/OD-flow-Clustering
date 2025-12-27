@@ -937,3 +937,24 @@ The DBSCAN parameter set `minPts = 20`, `eps = 0.2` provides:
 It is especially appropriate when your analysis aims to **balance the trade-off between representing the full demand and maintaining interpretability of directional flows**.
 This makes it a **strong candidate for final analysis** and report inclusion.
 
+# first pareto point
+Algorithm: HDBSCAN
+minPts: 30
+Clustered share: ~0.87
+Weighted dir cohesion: 0.00749
+Clusters used: 23
+
+# second pareto point
+Algorithm: HDBSCAN
+minPts: 10
+Clustered share: ~0.764423
+Weighted dir cohesion: 0.264262
+Clusters used: 1366
+
+# third pareto point
+Algorithm: HDBSCAN
+minPts: 20
+Clustered share: ~0.961243
+Weighted dir cohesion: 0.008827
+Clusters used: 31
+
