@@ -410,3 +410,47 @@ ggplot(plot_df) +
     x = "Easting (m)", y = "Northing (m)"
   )
 
+# Create a writable user library
+dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
+
+# Tell R to use it
+.libPaths(Sys.getenv("R_LIBS_USER"))
+
+# Now install packages
+install.packages(c("dplyr", "dbscan", "cluster"), repos = "https://cloud.r-project.org")
+
+library(dplyr)
+library(dbscan)
+library(cluster)
+
+sessionInfo()
+
+# STEP 1: Load data (if not already loaded)
+# berlin <- readRDS("berlin.rds")   # uncomment + set path if needed
+
+# STEP 1A: Check required columns exist
+req <- c("x_o","y_o","x_d","y_d","dx","dy","len","duration")
+missing <- setdiff(req, names(berlin))
+if(length(missing) > 0) {
+  stop(paste("Missing columns:", paste(missing, collapse=", ")))
+} else {
+  cat("OK: required columns exist.\n")
+}
+
+# STEP 1B: Build baseline 4D OD feature space
+X_raw <- berlin %>% dplyr::select(x_o, y_o, x_d, y_d)
+
+# Keep only complete cases
+keep <- complete.cases(X_raw)
+berlin_h <- berlin[keep, , drop = FALSE]
+X_raw <- X_raw[keep, , drop = FALSE]
+
+cat("Rows kept:", nrow(berlin_h), "out of", nrow(berlin), "\n")
+
+# STEP 1C: Scale (recommended)
+X <- scale(as.matrix(X_raw))
+
+# Quick sanity prints
+print(dim(X))
+print(head(X_raw, 3))
+
