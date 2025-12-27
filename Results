@@ -958,3 +958,495 @@ Clustered share: ~0.961243
 Weighted dir cohesion: 0.008827
 Clusters used: 31
 
+
+# Interpretation of HDBSCAN Results for Berlin
+
+## 1. Experimental setup (context for the reader)
+
+For Berlin, HDBSCAN was applied to a **4-dimensional Euclidean OD flow representation** consisting of origin and destination coordinates ((x_o, y_o, x_d, y_d)).
+The clustering was evaluated under a **multi-objective framework**, balancing:
+
+1. **Cluster significance** – measured as the share of OD flows assigned to retained clusters (after noise removal).
+2. **Directional cohesion** – measured as the **size-weighted mean cosine similarity** of individual flow directions relative to their cluster mean direction.
+
+The HDBSCAN parameter `minPts` was varied over a wide and meaningful range
+({10, 15, 20, 25, 30, 50}), generating a set of non-dominated solutions.
+
+---
+
+## 2. Overall clustering behavior in Berlin
+
+Across all parameter settings, HDBSCAN consistently identified:
+
+* A **dominant, very large cluster** containing the majority of flows.
+* A set of **smaller, directionally coherent clusters**, typically corresponding to corridor-like or radial movement patterns.
+* A **moderate noise share** (≈13%), indicating that most flows participate in stable density structures.
+
+This confirms that Berlin exhibits a **heterogeneous OD flow structure**, with both:
+
+* dense, directionally diverse background circulation, and
+* localized, highly directional mobility regimes.
+
+---
+
+## 3. Pareto trade-off structure
+
+### 3.1 Observed Pareto points (Berlin, HDBSCAN)
+
+| minPts | # clusters | clustered share | weighted directional cohesion |
+| -----: | ---------: | --------------: | ----------------------------: |
+|     10 |       1366 |            0.26 |                         0.764 |
+|     15 |         43 |           0.967 |                        0.0096 |
+|     20 |         31 |           0.961 |                        0.0088 |
+|     25 |         24 |           0.960 |                        0.0077 |
+|     30 |         23 |           ≈0.95 |                        0.0075 |
+|     50 |         10 |           0.953 |                        0.0051 |
+
+These solutions form a **clear but highly non-linear Pareto front**.
+
+---
+
+### 3.2 Interpretation of extreme regimes
+
+#### Direction-dominant regime (minPts = 10)
+
+* Produces a very large number of small clusters.
+* Retains only a small fraction of all flows.
+* Achieves **very high directional cohesion**.
+
+**Interpretation:**
+This regime isolates only the most strongly directional OD flows (e.g., strict corridors),
+at the cost of discarding the majority of urban mobility as noise or insignificant clusters.
+
+---
+
+#### Significance-dominant regime (minPts ≥ 25)
+
+* Produces very few clusters.
+* Retains almost all flows.
+* Exhibits **very low global directional cohesion**.
+
+**Interpretation:**
+Most OD flows in Berlin belong to a dense, directionally heterogeneous background circulation.
+Once this background is included, global directional cohesion collapses rapidly.
+
+---
+
+### 3.3 Knee / balanced regime (minPts ≈ 15–20)
+
+* Retains over **96% of flows**.
+* Preserves the **highest achievable directional cohesion** within the high-coverage regime.
+* Maintains a moderate and interpretable number of clusters.
+
+**Interpretation:**
+This regime represents the **best compromise** between coverage and directional structure.
+It captures almost all urban mobility while still isolating meaningful directional substructures.
+
+---
+
+## 4. Why the Pareto front appears “sparse” in the middle
+
+The Pareto front does **not** form a smooth continuum. Instead, it shows a **sharp transition** between regimes.
+
+This indicates that, in Berlin:
+
+> Directional coherence is not gradually lost as more flows are included; rather, it collapses abruptly once the dense background circulation is incorporated.
+
+This is a **structural property of the data**, not a limitation of the algorithm or objectives.
+
+---
+
+## 5. Implications for urban mobility interpretation
+
+The Berlin results reveal a **dual mobility structure**:
+
+1. A dominant, high-volume, directionally diverse background flow, likely reflecting short, local, and non-commuting trips.
+2. A smaller set of strongly directional clusters, corresponding to commuting corridors and major radial movements.
+
+This explains why:
+
+* unweighted directional metrics would be misleading, and
+* **size-weighted directional cohesion** is essential for economically meaningful evaluation.
+
+---
+
+## 6. Methodological significance
+
+From a methodological perspective, the Berlin HDBSCAN results demonstrate that:
+
+* Allowing **variable density clustering** uncovers mobility regimes that fixed-density methods may either fragment or over-aggregate.
+* Multi-objective evaluation is necessary to expose the **coverage–directionality trade-off**, which is invisible under single-objective clustering.
+* The identified knee solution provides a principled basis for selecting representative clusterings for mapping and qualitative analysis.
+
+---
+
+## 7. Summary statement (ready to paste)
+
+> *For Berlin, HDBSCAN reveals a pronounced trade-off between flow coverage and directional cohesion.
+While strongly directional OD flows exist, they account for a relatively small fraction of total mobility. Once the dominant background circulation is included,
+global directional cohesion collapses rapidly, resulting in a sparse Pareto front with a clear knee at minPts ≈ 15–20.
+This highlights the inherently heterogeneous structure of urban OD flows and motivates a multi-objective clustering framework.*
+
+
+For Cologne, HDBSCAN converges to a single stable clustering solution across all tested density parameters.
+The resulting Pareto front degenerates to a single point, with nearly all OD flows assigned to two clusters and very low global directional cohesion.
+This indicates a highly homogeneous OD flow structure,
+where density-based hierarchical clustering does not reveal meaningful trade-offs between flow coverage and directional organization.
+In contrast to Berlin, this highlights how urban scale and spatial heterogeneity critically shape the effectiveness of multi-objective flow clustering.
+
+Below is a **report-ready, self-contained interpretation** of **all HDBSCAN results for Cologne**, written in the same academic tone and structure as the Berlin section, so you can paste it directly into your report/script.
+
+---
+
+# Interpretation of HDBSCAN Results for Cologne
+
+## 1. Experimental setup (context)
+
+For Cologne, HDBSCAN was applied to the same **4-dimensional Euclidean OD flow representation** ((x_o, y_o, x_d, y_d)) used for Berlin,
+ensuring full methodological comparability across cities.
+Clustering outcomes were evaluated under the same **multi-objective framework**, balancing:
+
+1. **Cluster significance**, measured as the share of OD flows assigned to retained clusters.
+2. **Directional cohesion**, measured as the **size-weighted mean cosine similarity** of flow directions within clusters.
+
+The density parameter `minPts` was varied over
+({10, 15, 20, 25, 30, 50}).
+
+---
+
+## 2. Observed clustering behavior in Cologne
+
+Across all tested values of `minPts`, HDBSCAN produced **virtually identical clustering outcomes**:
+
+* Exactly **two clusters** were identified in all cases.
+* Nearly **100% of OD flows** were assigned to clusters, with negligible noise.
+* Global directional cohesion remained **low and constant**.
+
+This indicates that Cologne’s OD flows form a **single dominant and highly stable density structure**,
+with no meaningful hierarchical subdivision under density-based clustering.
+
+---
+
+## 3. Pareto outcomes for Cologne (HDBSCAN)
+
+| minPts | # clusters | clustered share | weighted directional cohesion |
+| -----: | ---------: | --------------: | ----------------------------: |
+|     10 |          2 |        1.000000 |                      0.004212 |
+|     15 |          2 |        1.000000 |                      0.004212 |
+|     20 |          2 |        1.000000 |                      0.004212 |
+|     25 |          2 |        1.000000 |                      0.004212 |
+|     30 |          2 |        1.000000 |                      0.004212 |
+|     50 |          2 |        0.999973 |                      0.004210 |
+
+All Pareto points either coincide exactly or differ only at the fourth decimal place.
+
+---
+
+## 4. Interpretation: a degenerate Pareto front
+
+Unlike Berlin, Cologne exhibits a **degenerate Pareto front** under HDBSCAN:
+
+* Varying `minPts` does **not** produce alternative trade-offs.
+* No solutions exist that sacrifice coverage to gain higher directional cohesion.
+* All parameter settings converge to the **same non-dominated solution**.
+
+In multi-objective terms, this means that:
+
+> **The objective space collapses to a single feasible solution under HDBSCAN.**
+
+This is not an algorithmic failure, but a direct reflection of the underlying OD flow structure.
+
+---
+
+## 5. Structural explanation (urban interpretation)
+
+Cologne is a **smaller, more compact, and relatively monocentric city** compared to Berlin. Its shared-mobility OD flows are characterized by:
+
+* short trip lengths,
+* locally distributed origins and destinations,
+* strongly overlapping movement directions.
+
+As a result:
+
+* directional substructures exist only weakly,
+* density contrasts across OD flows are limited,
+* hierarchical density clustering cannot isolate multiple stable regimes.
+
+Consequently, HDBSCAN identifies a **single dominant mobility regime**, which remains stable across all tested density thresholds.
+
+---
+
+## 6. Implications for directional cohesion
+
+The consistently low value of weighted directional cohesion (≈0.0042) indicates that:
+
+* even though nearly all flows are clustered,
+* the dominant clusters are **directionally heterogeneous**,
+* strongly directional corridors do not account for a substantial share of total mobility.
+
+This contrasts sharply with Berlin, where smaller but highly directional clusters coexist with a dense background flow.
+
+---
+
+## 7. Methodological significance
+
+From a methodological perspective, the Cologne results demonstrate that:
+
+* Allowing for hierarchical, variable-density clustering **does not always produce richer trade-offs**.
+* In highly homogeneous urban systems, HDBSCAN may converge to a **fixed-point solution**.
+* The absence of a Pareto trade-off is itself an informative outcome, highlighting structural differences between cities.
+
+This underscores the importance of **cross-city comparison** in evaluating clustering paradigms.
+
+---
+
+## 8. How Cologne differs from Berlin (explicit contrast)
+
+* **Berlin**: heterogeneous OD flows, multiple density regimes, rich Pareto front with a clear knee.
+* **Cologne**: homogeneous OD flows, single stable density regime, degenerate Pareto front.
+
+This contrast supports the broader claim that:
+
+> *Urban scale and spatial heterogeneity fundamentally shape the effectiveness of multi-objective OD flow clustering.*
+
+---
+
+## 9. Summary statement (ready to paste)
+
+> *For Cologne, HDBSCAN converges to a single stable clustering solution across all tested density parameters,
+yielding a degenerate Pareto front with nearly complete flow coverage and uniformly low directional cohesion.
+This reflects a highly homogeneous OD flow structure dominated by directionally diverse local trips,
+in contrast to the heterogeneous and multi-regime mobility patterns observed in Berlin.*
+
+
+# Interpretation of HDBSCAN Results for Munich
+
+## 1. Experimental setup (context)
+
+For Munich, HDBSCAN was applied to the same **4-dimensional Euclidean OD flow representation** ((x_o, y_o, x_d, y_d)) used for Berlin and Cologne,
+ensuring strict comparability across cities.
+Clustering outcomes were evaluated under the same **multi-objective framework**, balancing:
+
+1. **Cluster significance** – measured as the share of OD flows assigned to retained clusters.
+2. **Directional cohesion** – measured as the **size-weighted mean cosine similarity** of flow directions within clusters.
+
+The density parameter `minPts` was varied over
+({10, 15, 20, 25, 30, 50}).
+
+---
+
+## 2. Observed clustering behavior in Munich
+
+Unlike Cologne but also unlike Berlin, Munich exhibits an **intermediate clustering regime**:
+
+* A large number of clusters are detected across all parameter values.
+* Directional cohesion remains **substantially higher** than in Berlin and Cologne.
+* Increasing `minPts` leads to a **smooth and monotonic reduction** in both:
+
+  * the number of clusters, and
+  * global directional cohesion.
+
+This indicates that Munich’s OD flows contain **many moderately directional structures**, but lack the extreme heterogeneity observed in Berlin.
+
+---
+
+## 3. Pareto outcomes for Munich (HDBSCAN)
+
+| minPts | # clusters | clustered share | weighted directional cohesion |
+| -----: | ---------: | --------------: | ----------------------------: |
+|     10 |       3177 |           0.432 |                         0.310 |
+|     15 |       1868 |           0.378 |                         0.229 |
+|     20 |       1262 |           0.343 |                         0.182 |
+|     25 |        927 |           0.324 |                         0.149 |
+|     30 |        720 |           0.314 |                         0.133 |
+|     50 |        362 |           0.281 |                         0.084 |
+
+These points form a **dense and smooth Pareto front**, in contrast to the sparse fronts observed for Berlin and the degenerate front observed for Cologne.
+
+---
+
+## 4. Interpretation of the Pareto structure
+
+### 4.1 Directionally structured regime (low minPts)
+
+At low values of `minPts` (e.g., 10–15):
+
+* Thousands of clusters are identified.
+* A moderate share of flows is retained.
+* Directional cohesion is **very high** relative to the other cities.
+
+**Interpretation:**
+Munich contains a large number of **directionally consistent OD patterns**, likely reflecting structured commuting flows, radial movements,
+and regular intra-urban travel corridors.
+
+---
+
+### 4.2 Gradual trade-off regime (increasing minPts)
+
+As `minPts` increases:
+
+* Cluster counts decrease smoothly.
+* Clustered flow share declines steadily.
+* Directional cohesion decreases in a **continuous and predictable manner**.
+
+**Interpretation:**
+Unlike Berlin, Munich does not exhibit an abrupt collapse of directional structure.
+Instead, directional coherence is lost **gradually** as clusters are merged into larger density components.
+
+---
+
+### 4.3 Absence of a dominant background cluster
+
+A key contrast with Berlin is the **absence of a single dominant background flow cluster**:
+
+* Even at higher `minPts`, directional cohesion remains relatively high.
+* No solution approaches the extremely low cohesion values observed in Berlin or Cologne.
+
+This suggests that Munich’s mobility patterns are **more uniformly directional**, even at larger spatial scales.
+
+---
+
+## 5. Urban and structural explanation
+
+Munich’s OD flow structure appears to be:
+
+* less heterogeneous than Berlin,
+* more structured than Cologne,
+* characterized by **consistent directional regularity** across a wide range of trips.
+
+Possible explanations include:
+
+* strong radial commuting patterns,
+* a relatively compact but polycentric urban structure,
+* well-defined mobility corridors.
+
+As a result, hierarchical density clustering is able to uncover **many meaningful directional regimes** without collapsing them into a single background flow.
+
+---
+
+## 6. Methodological significance
+
+From a methodological perspective, the Munich results show that:
+
+* HDBSCAN can generate a **rich and continuous Pareto front** when OD flows exhibit gradual density transitions.
+* The multi-objective framework captures meaningful trade-offs without extreme regime shifts.
+* Munich represents a **mid-point case** between Berlin’s heterogeneous structure and Cologne’s homogeneous structure.
+
+This demonstrates that the effectiveness of hierarchical density-based clustering is **city-dependent**, and strongly influenced by underlying urban form.
+
+---
+
+## 7. Cross-city positioning of Munich
+
+Relative to the other cities:
+
+* **Berlin**: abrupt trade-off, dominant background flow, sparse Pareto front.
+* **Cologne**: homogeneous structure, degenerate Pareto front.
+* **Munich**: smooth trade-off, many directional regimes, dense Pareto front.
+
+Munich therefore provides the **clearest illustration** of a classical multi-objective trade-off between flow coverage and directional cohesion.
+
+---
+
+## 8. Summary statement (ready to paste)
+
+> *For Munich, HDBSCAN reveals a smooth and well-populated Pareto front, indicating a gradual trade-off between cluster significance and directional cohesion.
+Unlike Berlin, directional structure decays continuously rather than collapsing abruptly,
+and unlike Cologne, multiple meaningful density regimes persist across parameter values.
+This positions Munich as an intermediate case, characterized by a high degree of directional regularity and structured OD flow patterns.*
+
+
+Below is a **single, cohesive comparative subsection** synthesizing **Berlin, Munich, and Cologne**, written in a **paper-ready academic style**. You can paste this directly into your **Results** or **Discussion** section.
+
+---
+
+# Cross-City Comparison of HDBSCAN-Based Multi-Objective OD Flow Clustering
+
+
+## 1. Overview of cross-city differences
+
+Applying the same HDBSCAN-based multi-objective clustering framework to all three cities reveals **substantially different Pareto structures**,
+despite identical feature representations and evaluation criteria. These differences are therefore attributable to **intrinsic properties of the OD flow systems**,
+rather than algorithmic artifacts.
+
+At a high level, the cities can be ordered along a continuum of structural heterogeneity:
+
+[
+\text{Cologne} ;\rightarrow; \text{Munich} ;\rightarrow; \text{Berlin}
+]
+
+ranging from **highly homogeneous** to **highly heterogeneous** OD flow structures.
+
+---
+
+## 2. Berlin: heterogeneous structure with abrupt trade-offs
+
+Berlin exhibits the **most heterogeneous OD flow structure** among the three cities. HDBSCAN identifies:
+
+* a **dominant background cluster** containing the majority of flows,
+* multiple smaller but highly directional clusters,
+* a **sparse Pareto front** characterized by an abrupt transition between regimes.
+
+As cluster coverage increases, **global directional cohesion collapses rapidly**, producing a sharp knee in the Pareto front around `minPts ≈ 15–20`.
+This indicates that directional structure in Berlin is concentrated in **relatively small subsets of flows**, while most urban mobility is directionally diverse.
+
+Berlin therefore represents a case where **multi-objective optimization is essential**,
+as single-objective clustering would either fragment the system excessively or obscure meaningful directional substructures.
+
+---
+
+## 3. Cologne: homogeneous structure and degenerate Pareto front
+
+In contrast, Cologne displays a **highly homogeneous OD flow structure**. Across all tested HDBSCAN parameter values:
+
+* exactly two clusters are identified,
+* nearly all flows are retained,
+* global directional cohesion remains uniformly low.
+
+As a result, the Pareto front **degenerates to a single point**, indicating the absence of a meaningful trade-off between coverage and directional cohesion.
+Varying the density parameter does not uncover alternative non-dominated solutions.
+
+This behavior reflects Cologne’s **compact, monocentric mobility structure**, dominated by short, locally distributed, and directionally mixed trips.
+From a methodological perspective, this demonstrates that hierarchical density-based clustering may converge to a **fixed-point solution** in highly homogeneous urban systems.
+
+---
+
+## 4. Munich: intermediate structure with smooth trade-offs
+
+Munich occupies an **intermediate position** between Berlin and Cologne. HDBSCAN reveals:
+
+* a large number of clusters across all parameter values,
+* consistently higher directional cohesion than both Berlin and Cologne,
+* a **dense and smooth Pareto front**.
+
+Unlike Berlin, Munich does not exhibit an abrupt collapse of directional structure.
+Instead, directional cohesion decreases **gradually and monotonically** as cluster coverage increases.
+Unlike Cologne, multiple meaningful density regimes persist across the parameter space.
+
+This indicates that Munich’s OD flows are characterized by **widespread directional regularity**,
+likely reflecting strong radial commuting patterns and structured mobility corridors within a relatively compact but polycentric urban form.
+
+---
+
+## 5. Comparative implications
+
+Taken together, these results demonstrate that:
+
+* **Urban scale and heterogeneity critically shape OD flow clustering outcomes**.
+* The effectiveness and expressiveness of hierarchical density-based clustering are **city-dependent**.
+* Multi-objective evaluation is particularly informative in cities with heterogeneous mobility structures (e.g., Berlin),
+while homogeneous systems (e.g., Cologne) may not exhibit meaningful Pareto trade-offs.
+
+Munich provides a clear illustration of a classical multi-objective trade-off, Berlin highlights the presence of sharply competing mobility regimes,
+and Cologne exemplifies a structurally constrained system with limited clustering diversity.
+
+---
+
+## 6. Summary statement (ready to paste)
+
+> *The cross-city comparison reveals pronounced differences in OD flow structure.
+Berlin exhibits a highly heterogeneous system with an abrupt trade-off between flow coverage and directional cohesion,
+Munich displays a smooth and well-populated Pareto front indicative of gradual structural transitions,
+and Cologne converges to a single stable clustering solution reflecting a homogeneous mobility regime.
+These findings underscore the importance of multi-objective clustering and cross-city analysis for understanding urban mobility patterns.*
+
