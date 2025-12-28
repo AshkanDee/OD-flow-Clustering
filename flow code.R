@@ -410,47 +410,164 @@ ggplot(plot_df) +
     x = "Easting (m)", y = "Northing (m)"
   )
 
-# Create a writable user library
-dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
+# I used Python for HDBSCAN (in Colab)
 
-# Tell R to use it
-.libPaths(Sys.getenv("R_LIBS_USER"))
+!pip install pyreadr pandas
 
-# Now install packages
-install.packages(c("dplyr", "dbscan", "cluster"), repos = "https://cloud.r-project.org")
+import pyreadr
+import pandas as pd
 
-library(dplyr)
-library(dbscan)
-library(cluster)
+result = pyreadr.read_r('/content/drive/MyDrive/munich_flows_utm.rds')
 
-sessionInfo()
+# RDS contains a single object → extract it
+berlin = list(result.values())[0]
+type(berlin)
+berlin.describe(include='all')
+berlin.head()
 
-# STEP 1: Load data (if not already loaded)
-# berlin <- readRDS("berlin.rds")   # uncomment + set path if needed
+X = berlin[['x_o', 'y_o', 'x_d', 'y_d']].to_numpy()
 
-# STEP 1A: Check required columns exist
-req <- c("x_o","y_o","x_d","y_d","dx","dy","len","duration")
-missing <- setdiff(req, names(berlin))
-if(length(missing) > 0) {
-  stop(paste("Missing columns:", paste(missing, collapse=", ")))
-} else {
-  cat("OK: required columns exist.\n")
-}
+!pip -q install hdbscan
+import numpy as np
+import hdbscan
 
-# STEP 1B: Build baseline 4D OD feature space
-X_raw <- berlin %>% dplyr::select(x_o, y_o, x_d, y_d)
+minPts = 10, 15, 20, 25, 30, 50
 
-# Keep only complete cases
-keep <- complete.cases(X_raw)
-berlin_h <- berlin[keep, , drop = FALSE]
-X_raw <- X_raw[keep, , drop = FALSE]
+# Make sure dtype is efficient
+X_np = np.asarray(X, dtype=np.float32)
 
-cat("Rows kept:", nrow(berlin_h), "out of", nrow(berlin), "\n")
+clusterer = hdbscan.HDBSCAN(
+    min_cluster_size=minPts,
+    min_samples=minPts,
+    metric="euclidean",
+    cluster_selection_method="eom",
+    core_dist_n_jobs=-1
+)
 
-# STEP 1C: Scale (recommended)
-X <- scale(as.matrix(X_raw))
+labels = clusterer.fit_predict(X_np)          # noise = -1
+probs  = clusterer.probabilities_             # [0,1]
+outlier = clusterer.outlier_scores_           # higher = more outlier-ish
 
-# Quick sanity prints
-print(dim(X))
-print(head(X_raw, 3))
+# Convert to your convention: noise=0, clusters start at 1
+cluster = np.where(labels < 0, 0, labels + 1).astype(int)
 
+print("HDBSCAN done | minPts =", minPts)
+print("Clusters (excluding noise=0):", len(set(cluster)) - (1 if 0 in set(cluster) else 0))
+print("Noise share:", (cluster == 0).mean())
+
+# Top cluster sizes (including noise)
+unique, counts = np.unique(cluster, return_counts=True)
+sizes = sorted(zip(unique, counts), key=lambda x: x[1], reverse=True)
+print("Top 15 cluster sizes (label, size):")
+print(sizes[:15])
+
+
+berlin["cluster"] = cluster
+berlin["membership_prob"] = probs
+berlin["outlier_score"] = outlier
+
+berlin[["x_o","y_o","x_d","y_d","cluster","membership_prob","outlier_score"]].head()
+
+
+# Filter noise
+df_f = berlin[berlin["cluster"] != 0].copy()
+
+# Cluster sizes
+cluster_sizes = df_f["cluster"].value_counts()
+
+# Minimum cluster size (same idea as DBSCAN later)
+min_cluster_size = 10
+
+valid_clusters = cluster_sizes[cluster_sizes >= min_cluster_size].index
+
+# Apply filtering
+df_f = df_f[df_f["cluster"].isin(valid_clusters)]
+
+print("Clusters kept:", df_f["cluster"].nunique())
+print("Points kept:", len(df_f))
+
+import numpy as np
+
+def directional_cohesion_mean(dx, dy, eps=1e-12):
+    dx = np.asarray(dx, dtype=float)
+    dy = np.asarray(dy, dtype=float)
+    length = np.sqrt(dx**2 + dy**2)
+
+    mask = np.isfinite(length) & (length > 0)
+    dx = dx[mask] / length[mask]
+    dy = dy[mask] / length[mask]
+
+    if len(dx) < 2:
+        return np.nan
+
+    mx, my = dx.mean(), dy.mean()
+    mlen = np.sqrt(mx**2 + my**2) + eps
+    mx, my = mx/mlen, my/mlen
+
+    return np.mean(dx*mx + dy*my)
+
+# compute per-cluster directional similarity
+cluster_dir = (
+    df_f
+    .groupby("cluster")
+    .apply(lambda g: directional_cohesion_mean(g["dx"], g["dy"]))
+    .reset_index(name="dir_similarity")
+)
+
+# attach cluster sizes
+cluster_sizes = df_f["cluster"].value_counts().rename("size").reset_index()
+cluster_sizes.columns = ["cluster", "size"]
+
+cluster_summary = cluster_sizes.merge(cluster_dir, on="cluster")
+cluster_summary = cluster_summary.sort_values("size", ascending=False)
+
+cluster_summary.head(10)
+
+
+obj_clustered_share = len(df_f) / len(berlin)
+obj_clustered_share
+
+obj_weighted_dir = np.average(cluster_summary["dir_similarity"],
+                              weights=cluster_summary["size"]
+)
+
+obj_weighted_dir
+import pandas as pd
+
+pareto_point = pd.DataFrame([{
+    "city": "berlin",
+    "algorithm": "HDBSCAN",
+    "minPts": 10,
+    "n_clusters": int(cluster_summary.shape[0]),
+    "clustered_share": float(len(df_f) / len(berlin)),
+    "weighted_dir_cohesion": float(obj_weighted_dir)
+}])
+
+
+pareto_point
+
+plt.figure(figsize=(7, 5))
+
+plt.scatter(
+    pareto["clustered_share"],
+    pareto["weighted_dir"],
+    s=80
+)
+
+for _, row in pareto.iterrows():
+    plt.annotate(
+        f"minPts={int(row['minPts'])}",
+        (row["clustered_share"], row["weighted_dir"]),
+        textcoords="offset points",
+        xytext=(5, 5),
+        fontsize=9
+    )
+
+plt.xlabel("Clustered flow share")
+plt.ylabel("Weighted directional cohesion (log scale)")
+plt.yscale("log")   # 🔑 key line
+plt.title("Berlin – HDBSCAN Pareto Front (log scale)")
+plt.grid(True, which="both", linestyle="--", alpha=0.6)
+plt.tight_layout()
+plt.show()
+                                                
