@@ -1,3 +1,12 @@
+HDBSCAN was implemented using the reference Python implementation to leverage its hierarchical cluster selection and stability diagnostics.
+DBSCAN and OPTICS were implemented in R using the dbscan package, which provides a stable and efficient realization of density-based clustering in Euclidean space.
+To ensure comparability, all algorithms operated on the same 4D flow feature space and were evaluated using identical post-processing and multi-objective criteria.
+
+To ensure statistical robustness and avoid dominance of spurious micro-clusters, clusters with fewer than 10 OD flows were excluded from objective evaluation.
+This post-clustering filtering step was applied consistently across DBSCAN, HDBSCAN, and OPTICS,
+while the clustering algorithms themselves were executed without modification.
+The filtering affects only the computation of multi-objective performance metrics and does not alter the underlying cluster assignments.
+
 # filtering  data frame  to retain only rows with valid geographic coordinates for start and destination locations.
 Purpose
 
