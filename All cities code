@@ -213,7 +213,7 @@ for (city_id in names(prepared)) {
 dbscan_params <- list(
   berlin  = list(eps = 0.2, minPts = 30),
   cologne = list(eps = 0.3, minPts = 30),
-  munich  = list(eps = 0.2, minPts = 20)
+  munich  = list(eps = 0.2, minPts = 30)
 )
 ############################################################
 # Step 7a — Final DBSCAN run (all cities)
@@ -315,3 +315,227 @@ for (city_id in names(cluster_summaries)) {
 # To prevent a single city-wide cluster from masking secondary patterns,
 the dominant cluster (by size) is excluded from the multi-objective analysis when it accounts for a disproportionate share of flows.
 
+############################################################
+# Step 12 — Number of clusters used for MOO
+############################################################
+
+for (city_id in names(moo_clusters)) {
+
+  cluster_ids <- moo_clusters[[city_id]]$cluster
+  K <- length(cluster_ids)
+
+  cat("CITY:", toupper(city_id), "| K =", K, "\n")
+}
+
+############################################################
+# Step 13 — Directional similarity matrix (per city)
+############################################################
+
+direction_similarity <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  cs <- moo_clusters[[city_id]]
+
+  # Unit direction vectors
+  v <- as.matrix(cs[, c("mean_dx", "mean_dy")])
+  norms <- sqrt(rowSums(v^2))
+  norms[norms == 0] <- 1          # safety
+  u <- v / norms
+
+  # Cosine similarity matrix (K x K)
+  S <- u %*% t(u)
+  diag(S) <- NA                  # ignore self-similarity
+
+  direction_similarity[[city_id]] <- S
+
+  cat(
+    "CITY:", toupper(city_id),
+    "| K =", nrow(S),
+    "| similarity matrix computed\n"
+  )
+}
+############################################################
+# Step 14 — Weighted direction concentration
+############################################################
+
+dir_concentration_weighted <- function(sel, u, w) {
+  if (length(sel) < 2) return(0)
+
+  w_sel <- w[sel]
+  if (!is.finite(sum(w_sel)) || sum(w_sel) <= 0) return(0)
+
+  ww <- w_sel / sum(w_sel)
+  m  <- colSums(u[sel, , drop = FALSE] * ww)
+
+  sqrt(sum(m^2))
+}
+############################################################
+# Step 15 — Evaluation function (two objectives, both minimized)
+############################################################
+
+eval_solution <- function(x, df, u) {
+  sel <- which(x == 1)
+
+  # Objective 1: maximize total size -> minimize negative size
+  total_size <- if (length(sel) == 0) 0 else sum(df$size[sel], na.rm = TRUE)
+  f1 <- -total_size
+
+  # Objective 2: maximize directional concentration -> minimize negative concentration
+  dir_conc <- dir_concentration_weighted(sel, u, df$size)
+
+  # Penalty: require at least 2 clusters to define concentration meaningfully
+  f2 <- if (length(sel) < 2) 1 else -dir_conc
+
+  c(
+    f1_neg_size = f1,
+    f2_neg_dir_concentration = f2
+  )
+}
+############################################################
+# Step 15a — Test evaluation function (per city)
+############################################################
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_similarity[[city_id]]  # actually unit vectors stored earlier? careful
+  # ⚠️ IMPORTANT: u here must be the UNIT DIRECTION VECTORS, not S
+}
+direction_vectors <- list()
+direction_similarity <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  cs <- moo_clusters[[city_id]]
+
+  v <- as.matrix(cs[, c("mean_dx", "mean_dy")])
+  norms <- sqrt(rowSums(v^2))
+  norms[norms == 0] <- 1
+  u <- v / norms
+
+  S <- u %*% t(u)
+  diag(S) <- NA
+
+  direction_vectors[[city_id]]   <- u
+  direction_similarity[[city_id]] <- S
+}
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+
+  x <- rep(1, nrow(df))   # select all clusters
+
+  res <- eval_solution(x, df, u)
+
+  cat(
+    "CITY:", toupper(city_id),
+    "| f1 =", res[1],
+    "| f2 =", res[2], "\n"
+  )
+}
+############################################################
+# Step 15b — Sanity-check extreme solutions
+############################################################
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+  K  <- nrow(df)
+
+  cat("\nCITY:", toupper(city_id), "\n")
+
+  # Select no clusters
+  print(eval_solution(rep(0, K), df, u))
+
+  # Select all clusters
+  print(eval_solution(rep(1, K), df, u))
+}
+############################################################
+# Step 15b — Sanity checks (per city)
+############################################################
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+  K  <- nrow(df)
+
+  cat("\nCITY:", toupper(city_id), "\n")
+
+  # select none
+  print(eval_solution(rep(0, K), df, u))
+
+  # select all
+  print(eval_solution(rep(1, K), df, u))
+}
+############################################################
+# Step 15c — Sanity check with random selections (per city)
+############################################################
+
+set.seed(1)
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+  K  <- nrow(df)
+
+  cat("\nCITY:", toupper(city_id), "\n")
+
+  for (i in 1:5) {
+    x <- rbinom(K, 1, 0.2)
+    print(eval_solution(x, df, u))
+  }
+}
+############################################################
+# Step 16 — Random solution sampling (per city)
+############################################################
+
+set.seed(1)
+N <- 500
+
+vals_samples <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+  K  <- nrow(df)
+
+  vals <- matrix(NA, nrow = N, ncol = 2)
+
+  for (i in 1:N) {
+    x <- rbinom(K, 1, 0.2)
+    vals[i, ] <- eval_solution(x, df, u)
+  }
+
+  vals_df <- data.frame(
+    city = city_id,
+    covered_size = -vals[, 1],
+    dir_concentration = -vals[, 2]
+  )
+
+  vals_samples[[city_id]] <- vals_df
+
+  cat("\nCITY:", toupper(city_id), "\n")
+  print(summary(vals_df))
+}
+############################################################
+# Step 17 — Scatter plot of random solutions (per city)
+############################################################
+
+for (city_id in names(vals_samples)) {
+
+  vals_df <- vals_samples[[city_id]]
+
+  plot(
+    vals_df$covered_size,
+    vals_df$dir_concentration,
+    xlab = "Covered demand (sum size)",
+    ylab = "Direction concentration",
+    main = paste("Random solutions |", toupper(city_id))
+  )
+}
