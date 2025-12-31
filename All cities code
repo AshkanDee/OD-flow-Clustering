@@ -539,3 +539,363 @@ for (city_id in names(vals_samples)) {
     main = paste("Random solutions |", toupper(city_id))
   )
 }
+install.packages("mco")
+library(mco)
+############################################################
+# Step 18 — Objective function wrapper (per city)
+############################################################
+
+objfun_list <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+
+  objfun_list[[city_id]] <- function(x_cont) {
+    x_bin <- as.integer(x_cont > 0.5)
+    eval_solution(x_bin, df, u)
+  }
+}
+city_id <- "berlin"
+K <- nrow(moo_clusters[[city_id]])
+
+x_test <- runif(K)
+objfun_list[[city_id]](x_test)
+############################################################
+# Step 19 — NSGA-II optimization (per city)
+############################################################
+
+set.seed(1)
+
+nsga_results <- list()
+
+for (city_id in names(objfun_list)) {
+
+  K <- nrow(moo_clusters[[city_id]])
+
+  res <- nsga2(
+    fn = objfun_list[[city_id]],
+    idim = K,
+    odim = 2,
+    lower.bounds = rep(0, K),
+    upper.bounds = rep(1, K),
+    popsize = 200,
+    generations = 200
+  )
+
+  nsga_results[[city_id]] <- res
+
+  cat("NSGA-II finished for:", toupper(city_id), "\n")
+}
+direction_vectors <- list()
+
+for (city_id in names(moo_clusters)) {
+  cs <- moo_clusters[[city_id]]
+
+  v <- as.matrix(cs[, c("mean_dx", "mean_dy")])
+  norms <- sqrt(rowSums(v^2))
+  norms[norms == 0] <- 1
+  u <- v / norms
+
+  direction_vectors[[city_id]] <- u
+}
+objfun_list <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+
+  objfun_list[[city_id]] <- local({
+    df_local <- df
+    u_local  <- u
+
+    function(x_cont) {
+      x_bin <- as.integer(x_cont > 0.5)
+      eval_solution(x_bin, df_local, u_local)
+    }
+  })
+}
+set.seed(1)
+nsga_results <- list()
+
+for (city_id in names(objfun_list)) {
+
+  K <- nrow(moo_clusters[[city_id]])
+  cat("Running NSGA-II |", city_id, "| K =", K, "\n")
+
+  nsga_results[[city_id]] <- nsga2(
+    fn = objfun_list[[city_id]],
+    idim = K,
+    odim = 2,
+    lower.bounds = rep(0, K),
+    upper.bounds = rep(1, K),
+    popsize = 200,
+    generations = 200
+  )
+}
+for (city_id in names(nsga_results)) {
+
+  F <- nsga_results[[city_id]]$value
+
+  pareto_df <- data.frame(
+    covered_demand     = -F[, 1],
+    dir_concentration  = -F[, 2]
+  )
+
+  plot(pareto_df$covered_demand, pareto_df$dir_concentration,
+       xlab = "Covered demand (sum size)",
+       ylab = "Direction concentration",
+       main = paste("Pareto front |", toupper(city_id)))
+}
+for (city_id in names(moo_clusters)) {
+  df <- moo_clusters[[city_id]]
+  cat(city_id, ": K =", nrow(df),
+      "| total clustered size =", sum(df$size), "\n")
+}
+############################################################
+# Step 21 — Pareto front summary (per city, DBSCAN)
+############################################################
+
+pareto_summaries <- list()
+
+for (city_id in names(nsga_results)) {
+
+  F <- nsga_results[[city_id]]$value
+
+  pareto_df <- data.frame(
+    covered_demand    = -F[, 1],
+    dir_concentration = -F[, 2]
+  )
+
+  pareto_summaries[[city_id]] <- pareto_df
+
+  cat("\n---", toupper(city_id), "---\n")
+  print(summary(pareto_df))
+}
+############################################################
+# Step 22 — Knee point selection on Pareto front (per city)
+############################################################
+
+knee_points <- list()
+
+for (city_id in names(pareto_summaries)) {
+
+  pareto_df <- pareto_summaries[[city_id]]
+
+  x <- pareto_df$covered_demand
+  y <- pareto_df$dir_concentration
+
+  # Normalize objectives to [0,1]
+  x_n <- (x - min(x)) / (max(x) - min(x))
+  y_n <- (y - min(y)) / (max(y) - min(y))
+
+  # Distance to ideal point (1,1)
+  dist <- sqrt((1 - x_n)^2 + (1 - y_n)^2)
+
+  knee_idx <- which.min(dist)
+
+  knee_points[[city_id]] <- pareto_df[knee_idx, ]
+
+  cat("\n---", toupper(city_id), "---\n")
+  cat("Knee index:", knee_idx, "\n")
+  print(pareto_df[knee_idx, ])
+}
+############################################################
+# Step 23 — Selected clusters at knee point (per city)
+############################################################
+
+selected_clusters_by_city <- list()
+
+for (city_id in names(nsga_results)) {
+
+  res <- nsga_results[[city_id]]
+  df  <- moo_clusters[[city_id]]
+
+  pareto_df <- pareto_summaries[[city_id]]
+
+  # Recompute knee_idx consistently (same logic as Step 22)
+  x <- pareto_df$covered_demand
+  y <- pareto_df$dir_concentration
+  x_n <- (x - min(x)) / (max(x) - min(x))
+  y_n <- (y - min(y)) / (max(y) - min(y))
+  dist <- sqrt((1 - x_n)^2 + (1 - y_n)^2)
+  knee_idx <- which.min(dist)
+
+  # Selected clusters from NSGA-II solution at knee
+  x_knee <- as.integer(res$par[knee_idx, ] > 0.5)
+  selected_clusters <- df$cluster[x_knee == 1]
+
+  selected_clusters_by_city[[city_id]] <- selected_clusters
+
+  cat("\n---", toupper(city_id), "---\n")
+  cat("Selected clusters:", length(selected_clusters), "\n")
+  print(selected_clusters)
+}
+############################################################
+# Step 24 — Extreme and knee Pareto solutions (per city)
+############################################################
+
+pareto_extremes <- list()
+
+for (city_id in names(pareto_summaries)) {
+
+  pareto_df <- pareto_summaries[[city_id]]
+
+  # Indices of extreme solutions
+  best_dir_idx <- which.max(pareto_df$dir_concentration)
+  best_cov_idx <- which.max(pareto_df$covered_demand)
+
+  # Recompute knee index (same as Step 22)
+  x <- pareto_df$covered_demand
+  y <- pareto_df$dir_concentration
+  x_n <- (x - min(x)) / (max(x) - min(x))
+  y_n <- (y - min(y)) / (max(y) - min(y))
+  dist <- sqrt((1 - x_n)^2 + (1 - y_n)^2)
+  knee_idx <- which.min(dist)
+
+  pareto_extremes[[city_id]] <- list(
+    best_direction = pareto_df[best_dir_idx, ],
+    best_coverage  = pareto_df[best_cov_idx, ],
+    knee_solution  = pareto_df[knee_idx, ]
+  )
+
+  cat("\n---", toupper(city_id), "---\n")
+  cat("Best direction solution:\n")
+  print(pareto_df[best_dir_idx, ])
+  cat("Best coverage solution:\n")
+  print(pareto_df[best_cov_idx, ])
+  cat("Knee solution:\n")
+  print(pareto_df[knee_idx, ])
+}
+############################################################
+# Step 25 — Decode NSGA-II solutions into cluster IDs (per city)
+############################################################
+
+decode_solution <- function(sol_idx, res, df) {
+  x_bin <- as.integer(res$par[sol_idx, ] > 0.5)
+  df$cluster[x_bin == 1]
+}
+
+decoded_clusters <- list()
+
+for (city_id in names(nsga_results)) {
+
+  res <- nsga_results[[city_id]]
+  df  <- moo_clusters[[city_id]]
+  pareto_df <- pareto_summaries[[city_id]]
+
+  # Indices (same logic as Step 24)
+  best_dir_idx <- which.max(pareto_df$dir_concentration)
+  best_cov_idx <- which.max(pareto_df$covered_demand)
+
+  x <- pareto_df$covered_demand
+  y <- pareto_df$dir_concentration
+  x_n <- (x - min(x)) / (max(x) - min(x))
+  y_n <- (y - min(y)) / (max(y) - min(y))
+  knee_idx <- which.min(sqrt((1 - x_n)^2 + (1 - y_n)^2))
+
+  clusters_best_dir <- decode_solution(best_dir_idx, res, df)
+  clusters_best_cov <- decode_solution(best_cov_idx, res, df)
+  clusters_knee     <- decode_solution(knee_idx,     res, df)
+
+  decoded_clusters[[city_id]] <- list(
+    best_direction = clusters_best_dir,
+    best_coverage  = clusters_best_cov,
+    knee_solution  = clusters_knee
+  )
+
+  cat("\n---", toupper(city_id), "---\n")
+  cat("Best direction | n =", length(clusters_best_dir), "\n")
+  print(clusters_best_dir)
+  cat("Best coverage  | n =", length(clusters_best_cov), "\n")
+  print(clusters_best_cov)
+  cat("Knee solution  | n =", length(clusters_knee), "\n")
+  print(clusters_knee)
+}
+############################################################
+# Step 26 — Publishable printing of decoded cluster IDs (per city)
+############################################################
+
+print_vec <- function(v) {
+  if (length(v) == 0) {
+    cat("(none)\n")
+  } else {
+    cat(paste(v, collapse = ", "), "\n")
+  }
+}
+
+for (city_id in names(decoded_clusters)) {
+
+  cat("\n====================\n")
+  cat("CITY:", toupper(city_id), "\n")
+  cat("====================\n")
+
+  cat("best_dir clusters:\n")
+  print_vec(decoded_clusters[[city_id]]$best_direction)
+
+  cat("best_cov clusters:\n")
+  print_vec(decoded_clusters[[city_id]]$best_coverage)
+
+  cat("knee clusters:\n")
+  print_vec(decoded_clusters[[city_id]]$knee_solution)
+}
+############################################################
+# Step 27 — Solution tables for selected Pareto solutions (per city)
+############################################################
+
+make_solution_table <- function(selected, cluster_summary) {
+  cluster_summary %>%
+    dplyr::filter(cluster %in% selected) %>%
+    dplyr::select(
+      cluster,
+      size,
+      mean_dx,
+      mean_dy,
+      mean_len,
+      mean_duration
+    ) %>%
+    dplyr::arrange(dplyr::desc(size))
+}
+
+solution_tables <- list()
+
+for (city_id in names(decoded_clusters)) {
+
+  cs <- cluster_summaries[[city_id]]
+
+  tab_best_dir <- make_solution_table(
+    decoded_clusters[[city_id]]$best_direction,
+    cs
+  )
+
+  tab_knee <- make_solution_table(
+    decoded_clusters[[city_id]]$knee_solution,
+    cs
+  )
+
+  tab_best_cov <- make_solution_table(
+    decoded_clusters[[city_id]]$best_coverage,
+    cs
+  )
+
+  solution_tables[[city_id]] <- list(
+    best_direction = tab_best_dir,
+    knee_solution  = tab_knee,
+    best_coverage  = tab_best_cov
+  )
+
+  cat("\n====================\n")
+  cat("CITY:", toupper(city_id), "\n")
+  cat("====================\n")
+
+  cat("\nBest direction solution (top 10 clusters):\n")
+  print(head(tab_best_dir, 10))
+
+  cat("\nKnee solution (top 10 clusters):\n")
+  print(head(tab_knee, 10))
+
+  cat("\nBest coverage solution (top 10 clusters):\n")
+  print(head(tab_best_cov, 10))
+}
