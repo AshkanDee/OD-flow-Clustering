@@ -446,3 +446,208 @@ city             total_clustered_demand covered_best_direction pct_best_directio
 1         2431  2.3707590                  3493         3.4064423
 2         7596 13.0661392                  8399        14.4474069
 3          675  0.5323428                  1185         0.9345573
+
+#HDBSCAN Python
+No OD records were removed due to missing values in the clustering features in any city (Berlin n=173,854; Munich dropped about 40,000 n=181,371; Cologne n=72,770).”
+
+[BERLIN] HDBSCAN done | minPts=10
+  Clusters (excluding noise=0): 1366
+  Noise share: 0.7357380330622246
+  Top 15 cluster sizes (label, size):
+  [(0, 127911), (1, 3125), (2, 942), (7, 611), (954, 399), (1366, 381), (87, 271), (18, 264), (442, 255), (785, 252), (965, 245), (757, 236), (641, 218), (1018, 208), (1114, 208)]
+
+[BERLIN] HDBSCAN done | minPts=15
+  Clusters (excluding noise=0): 43
+  Noise share: 0.03307948048362419
+  Top 15 cluster sizes (label, size):
+  [(10, 161843), (0, 5751), (1, 3125), (2, 943), (6, 595), (9, 263), (7, 248), (17, 68), (38, 65), (3, 52), (26, 48), (36, 47), (43, 47), (30, 43), (12, 38)]
+
+[BERLIN] HDBSCAN done | minPts=20
+  Clusters (excluding noise=0): 31
+  Noise share: 0.038756657885352076
+  Top 15 cluster sizes (label, size):
+  [(10, 161045), (0, 6738), (1, 3126), (3, 941), (5, 597), (6, 274), (8, 152), (14, 95), (13, 68), (21, 68), (29, 65), (18, 54), (2, 49), (16, 48), (17, 46)]
+
+[BERLIN] HDBSCAN done | minPts=25
+  Clusters (excluding noise=0): 24
+  Noise share: 0.03987253672621855
+  Top 15 cluster sizes (label, size):
+  [(8, 160946), (0, 6932), (1, 3126), (2, 943), (6, 588), (7, 273), (4, 242), (10, 72), (22, 68), (18, 66), (24, 65), (17, 53), (3, 49), (20, 49), (12, 48)]
+
+[BERLIN] HDBSCAN done | minPts=30
+  Clusters (excluding noise=0): 23
+  Noise share: 0.13158742393042439
+  Top 15 cluster sizes (label, size):
+  [(23, 144452), (0, 22877), (1, 3125), (2, 942), (4, 823), (21, 271), (7, 258), (22, 189), (6, 154), (9, 91), (15, 89), (17, 68), (10, 67), (18, 65), (3, 49)]
+
+[BERLIN] HDBSCAN done | minPts=50
+  Clusters (excluding noise=0): 10
+  Noise share: 0.04746511440634095
+  Top 15 cluster sizes (label, size):
+  [(10, 159818), (0, 8252), (1, 3125), (2, 943), (3, 804), (9, 257), (7, 164), (8, 160), (4, 155), (6, 119), (5, 57)]
+/usr/local/lib/python3.12/dist-packages/hdbscan/hdbscan_.py:1509: RuntimeWarning: invalid value encountered in scalar divide
+  self._outlier_scores = outlier_scores(self._condensed_tree)
+
+[MUNICH] HDBSCAN done | minPts=10
+  Clusters (excluding noise=0): 3177
+  Noise share: 0.5680180403702907
+  Top 15 cluster sizes (label, size):
+  [(0, 103022), (1409, 230), (3, 161), (3049, 155), (2512, 152), (3121, 145), (1388, 143), (1536, 141), (531, 140), (2201, 138), (2903, 132), (2252, 126), (510, 118), (2516, 118), (3172, 118)]
+/usr/local/lib/python3.12/dist-packages/hdbscan/hdbscan_.py:1509: RuntimeWarning: invalid value encountered in scalar divide
+  self._outlier_scores = outlier_scores(self._condensed_tree)
+
+[MUNICH] HDBSCAN done | minPts=15
+  Clusters (excluding noise=0): 1868
+  Noise share: 0.6218359054093543
+  Top 15 cluster sizes (label, size):
+  [(0, 112783), (3, 159), (961, 156), (413, 146), (1811, 145), (1863, 144), (602, 143), (1069, 141), (1200, 141), (89, 140), (315, 140), (1011, 139), (1175, 138), (1370, 138), (1692, 138)]
+/usr/local/lib/python3.12/dist-packages/hdbscan/hdbscan_.py:1509: RuntimeWarning: invalid value encountered in scalar divide
+  self._outlier_scores = outlier_scores(self._condensed_tree)
+
+[MUNICH] HDBSCAN done | minPts=20
+  Clusters (excluding noise=0): 1262
+  Noise share: 0.6568359881127633
+  Top 15 cluster sizes (label, size):
+  [(0, 119131), (70, 247), (1043, 243), (661, 239), (369, 229), (240, 228), (1208, 226), (4, 225), (518, 206), (860, 206), (651, 202), (278, 198), (1069, 196), (520, 191), (1255, 176)]
+/usr/local/lib/python3.12/dist-packages/hdbscan/hdbscan_.py:1509: RuntimeWarning: invalid value encountered in scalar divide
+  self._outlier_scores = outlier_scores(self._condensed_tree)
+
+[MUNICH] HDBSCAN done | minPts=25
+  Clusters (excluding noise=0): 927
+  Noise share: 0.67580263658468
+  Top 15 cluster sizes (label, size):
+  [(0, 122571), (493, 416), (644, 361), (738, 285), (927, 283), (657, 269), (915, 259), (534, 249), (47, 240), (251, 237), (330, 231), (298, 225), (4, 224), (200, 224), (387, 211)]
+/usr/local/lib/python3.12/dist-packages/hdbscan/hdbscan_.py:1509: RuntimeWarning: invalid value encountered in scalar divide
+  self._outlier_scores = outlier_scores(self._condensed_tree)
+
+[MUNICH] HDBSCAN done | minPts=30
+  Clusters (excluding noise=0): 720
+  Noise share: 0.6862067254412227
+  Top 15 cluster sizes (label, size):
+  [(0, 124458), (456, 418), (128, 394), (695, 391), (474, 383), (431, 372), (313, 317), (71, 303), (530, 289), (555, 286), (550, 268), (172, 262), (714, 255), (368, 252), (426, 250)]
+
+[MUNICH] HDBSCAN done | minPts=50
+  Clusters (excluding noise=0): 362
+  Noise share: 0.7191116551157573
+  Top 15 cluster sizes (label, size):
+  [(0, 130426), (12, 3273), (245, 1011), (209, 833), (341, 766), (9, 473), (19, 468), (177, 461), (305, 438), (229, 432), (87, 402), (275, 382), (11, 376), (219, 372), (136, 371)]
+
+[COLOGNE] HDBSCAN done | minPts=10
+  Clusters (excluding noise=0): 2
+  Noise share: 0.0
+  Top 15 cluster sizes (label, size):
+  [(2, 72602), (1, 168)]
+
+[COLOGNE] HDBSCAN done | minPts=15
+  Clusters (excluding noise=0): 2
+  Noise share: 0.0
+  Top 15 cluster sizes (label, size):
+  [(2, 72602), (1, 168)]
+
+[COLOGNE] HDBSCAN done | minPts=20
+  Clusters (excluding noise=0): 2
+  Noise share: 0.0
+  Top 15 cluster sizes (label, size):
+  [(2, 72602), (1, 168)]
+
+[COLOGNE] HDBSCAN done | minPts=25
+  Clusters (excluding noise=0): 2
+  Noise share: 0.0
+  Top 15 cluster sizes (label, size):
+  [(2, 72602), (1, 168)]
+
+[COLOGNE] HDBSCAN done | minPts=30
+  Clusters (excluding noise=0): 2
+  Noise share: 0.0
+  Top 15 cluster sizes (label, size):
+  [(2, 72602), (1, 168)]
+
+[COLOGNE] HDBSCAN done | minPts=50
+  Clusters (excluding noise=0): 2
+  Noise share: 2.7483853236223717e-05
+  Top 15 cluster sizes (label, size):
+  [(2, 72600), (1, 168), (0, 2)]
+
+=== Combined summary (all cities) ===
+city	algorithm	minPts	n_clusters	noise_share	clustered_share	top15_sizes
+0	berlin	HDBSCAN	10	1366	0.735738	0.264262	[(0, 127911), (1, 3125), (2, 942), (7, 611), (...
+1	berlin	HDBSCAN	15	43	0.033079	0.966921	[(10, 161843), (0, 5751), (1, 3125), (2, 943),...
+2	berlin	HDBSCAN	20	31	0.038757	0.961243	[(10, 161045), (0, 6738), (1, 3126), (3, 941),...
+3	berlin	HDBSCAN	25	24	0.039873	0.960127	[(8, 160946), (0, 6932), (1, 3126), (2, 943), ...
+4	berlin	HDBSCAN	30	23	0.131587	0.868413	[(23, 144452), (0, 22877), (1, 3125), (2, 942)...
+5	berlin	HDBSCAN	50	10	0.047465	0.952535	[(10, 159818), (0, 8252), (1, 3125), (2, 943),...
+6	munich	HDBSCAN	10	3177	0.568018	0.431982	[(0, 103022), (1409, 230), (3, 161), (3049, 15...
+7	munich	HDBSCAN	15	1868	0.621836	0.378164	[(0, 112783), (3, 159), (961, 156), (413, 146)...
+8	munich	HDBSCAN	20	1262	0.656836	0.343164	[(0, 119131), (70, 247), (1043, 243), (661, 23...
+9	munich	HDBSCAN	25	927	0.675803	0.324197	[(0, 122571), (493, 416), (644, 361), (738, 28...
+10	munich	HDBSCAN	30	720	0.686207	0.313793	[(0, 124458), (456, 418), (128, 394), (695, 39...
+11	munich	HDBSCAN	50	362	0.719112	0.280888	[(0, 130426), (12, 3273), (245, 1011), (209, 8...
+12	cologne	HDBSCAN	10	2	0.000000	1.000000	[(2, 72602), (1, 168)]
+13	cologne	HDBSCAN	15	2	0.000000	1.000000	[(2, 72602), (1, 168)]
+14	cologne	HDBSCAN	20	2	0.000000	1.000000	[(2, 72602), (1, 168)]
+15	cologne	HDBSCAN	25	2	0.000000	1.000000	[(2, 72602), (1, 168)]
+16	cologne	HDBSCAN	30	2	0.000000	1.000000	[(2, 72602), (1, 168)]
+17	cologne	HDBSCAN	50	2	0.000027	0.999973	[(2, 72600), (1, 168), (0, 2)]
+
+Methods (HDBSCAN configuration)
+
+“HDBSCAN was applied to standardized 4D OD representations. To assess robustness, we varied the minimum cluster size (minPts) while keeping all other parameters fixed.”
+
+Results (Cologne)
+
+“Across all tested minPts values, Cologne consistently yielded only two stable clusters with near-zero noise.
+Diagnostic checks confirmed that this behavior was not driven by OD duplication or coordinate snapping.
+Instead, it reflects a highly compact and globally dense OD flow structure, in which most trips remain density-connected under strict clustering thresholds.”
+
+Results (cross-city comparison)
+
+“In contrast, Berlin exhibited a multi-modal density structure with a clear trade-off between cluster count and coverage,
+while Munich showed strong local density pockets but high overall fragmentation, resulting in many small clusters and a large fraction of noise points.”
+
+=== Pareto table (all cities) ===
+city	algorithm	minPts	clustered_share	directional_cohesion
+0	berlin	HDBSCAN	10	0.264262	0.764423
+1	berlin	HDBSCAN	15	0.966921	0.009553
+2	berlin	HDBSCAN	20	0.961243	0.008827
+3	berlin	HDBSCAN	25	0.960127	0.007713
+4	berlin	HDBSCAN	30	0.868413	0.007488
+5	berlin	HDBSCAN	50	0.952535	0.005100
+12	cologne	HDBSCAN	10	1.000000	0.004212
+13	cologne	HDBSCAN	15	1.000000	0.004212
+14	cologne	HDBSCAN	20	1.000000	0.004212
+15	cologne	HDBSCAN	25	1.000000	0.004212
+16	cologne	HDBSCAN	30	1.000000	0.004212
+17	cologne	HDBSCAN	50	0.999973	0.004210
+6	munich	HDBSCAN	10	0.431982	0.309572
+7	munich	HDBSCAN	15	0.378164	0.229166
+8	munich	HDBSCAN	20	0.343164	0.182045
+9	munich	HDBSCAN	25	0.324197	0.149064
+10	munich	HDBSCAN	30	0.313793	0.132562
+11	munich	HDBSCAN	50	0.280888	0.084253
+
+
+“For Berlin, HDBSCAN yields a clear two-regime trade-off.
+At minPts=10, the algorithm identifies many small, directionally coherent clusters but assigns the majority of flows to noise (clustered share ≈ 0.26; cohesion ≈ 0.76).
+Increasing minPts to 15 produces near-complete coverage (clustered share ≈ 0.97) but
+substantially reduces directional cohesion (≈ 0.01), indicating that clusters become directionally heterogeneous.
+All intermediate and higher minPts settings are dominated by the minPts=15 solution.”
+
+For Munich, all tested parameterizations form a monotonic deterioration curve in which both clustered share and directional cohesion decrease with increasing minPts.
+Consequently, the Pareto front collapses to a single non-dominated solution (minPts=10), indicating the absence of a meaningful multi-objective trade-off.
+
+“For Cologne, HDBSCAN yields near-complete coverage and almost constant directional cohesion across all tested minPts values.
+As a result, the Pareto front degenerates into a flat, trivial set, indicating a single dominant OD structure with no meaningful coverage–cohesion trade-off.”
+
+Multi-objective OD clustering is city-dependent.
+It is informative only when the underlying OD system exhibits competing structural objectives.
+
+“While Berlin exhibits a clear Pareto trade-off between clustered share and directional cohesion, Munich and Cologne do not.
+In Munich, both objectives deteriorate monotonically with increasing minPts, collapsing the Pareto front to a single solution.
+In Cologne, both objectives remain nearly constant across all parameterizations, yielding a trivial Pareto front.
+These findings indicate that meaningful multi-objective OD clustering emerges only in cities with sufficiently heterogeneous flow structures.”
+
+“Figure X illustrates the Pareto fronts obtained for Berlin, Munich, and Cologne. 
+Berlin exhibits a clear two-point Pareto front, revealing a pronounced trade-off between clustered share and directional cohesion:
+a low-coverage but highly directionally consistent solution (minPts = 10) versus a high-coverage but directionally heterogeneous solution (minPts = 15). 
+In contrast, Munich shows a collapsed Pareto front, where both objectives deteriorate monotonically with increasing minPts, and Cologne yields a trivial, 
+flat Pareto front characterized by near-complete coverage and almost constant directional cohesion across all parameter settings.”
