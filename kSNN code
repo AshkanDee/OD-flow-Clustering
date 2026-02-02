@@ -1,0 +1,2232 @@
+############################################################
+# Step A1 — Grid-based OD aggregation (UTM) for all cities
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# ---- choose grid resolution (meters)
+# 200–300m: more detail, larger n_agg
+# 400–600m: more smoothing, smaller n_agg
+cell_size_m <- 300
+
+# required columns (UTM)
+od_cols_utm <- c("x_o", "y_o", "x_d", "y_d")
+
+assert_has_cols <- function(dt, cols, city_id) {
+  miss <- setdiff(cols, names(dt))
+  if (length(miss) > 0) stop(sprintf("City '%s' missing: %s", city_id, paste(miss, collapse=", ")))
+  invisible(TRUE)
+}
+
+# ---- aggregation function
+aggregate_od_grid <- function(dt, cell_size_m = 300) {
+  dt <- copy(dt)
+
+  # grid cell indices (integers)
+  dt[, `:=`(
+    ox = as.integer(floor(x_o / cell_size_m)),
+    oy = as.integer(floor(y_o / cell_size_m)),
+    dx = as.integer(floor(x_d / cell_size_m)),
+    dy = as.integer(floor(y_d / cell_size_m))
+  )]
+
+  # aggregate by OD-cell pair
+  agg <- dt[, .(
+    w = .N,
+    # representative continuous coords (cell center) for clustering
+    x_o = (median(ox) + 0.5) * cell_size_m,
+    y_o = (median(oy) + 0.5) * cell_size_m,
+    x_d = (median(dx) + 0.5) * cell_size_m,
+    y_d = (median(dy) + 0.5) * cell_size_m
+  ), by = .(ox, oy, dx, dy)]
+
+  setorder(agg, -w)
+  agg
+}
+
+# ---- run for all cities
+od_agg <- list()
+X_scaled_agg <- list()
+
+cat("Aggregating OD flows into grid cells...\n")
+for (city_id in names(city_data)) {
+  dt <- city_data[[city_id]]
+  assert_has_cols(dt, od_cols_utm, city_id)
+
+  agg <- aggregate_od_grid(dt, cell_size_m = cell_size_m)
+  agg[, city := city_id]
+  od_agg[[city_id]] <- agg
+
+  # 4D matrix for clustering (scaled)
+  X <- as.matrix(agg[, .(x_o, y_o, x_d, y_d)])
+  storage.mode(X) <- "double"
+  X_scaled_agg[[city_id]] <- scale(X)
+
+  cat(sprintf(
+    "\n[%s] trips=%d | aggregated OD bundles=%d | compression=%0.2fx | top weight=%d\n",
+    city_id, nrow(dt), nrow(agg), nrow(dt)/nrow(agg), agg$w[1]
+  ))
+}
+
+cat("\nStep A1 done.\n")
+############################################################
+# Step A1b — Choose grid size per city to hit target bundles
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+od_cols_utm <- c("x_o","y_o","x_d","y_d")
+
+assert_has_cols <- function(dt, cols, city_id) {
+  miss <- setdiff(cols, names(dt))
+  if (length(miss) > 0) stop(sprintf("City '%s' missing: %s", city_id, paste(miss, collapse=", ")))
+  invisible(TRUE)
+}
+
+count_bundles_for_cell <- function(dt, cell_size_m) {
+  ox <- as.integer(floor(dt$x_o / cell_size_m))
+  oy <- as.integer(floor(dt$y_o / cell_size_m))
+  dx <- as.integer(floor(dt$x_d / cell_size_m))
+  dy <- as.integer(floor(dt$y_d / cell_size_m))
+  uniqueN(data.table(ox, oy, dx, dy))
+}
+
+# ---- targets and candidates
+target_n <- 25000
+cell_candidates <- c(300, 400, 500, 600, 800, 1000)  # meters
+
+grid_choice <- data.table(city=character(), cell_size_m=integer(), bundles=integer(), compression=numeric())
+
+cat("Auto-tuning grid size...\n")
+for (city_id in names(city_data)) {
+  dt <- city_data[[city_id]]
+  assert_has_cols(dt, od_cols_utm, city_id)
+
+  bundles_vec <- sapply(cell_candidates, function(cs) count_bundles_for_cell(dt, cs))
+
+  # choose smallest cs meeting target, else largest cs
+  ok <- which(bundles_vec <= target_n)
+  pick_idx <- if (length(ok) > 0) min(ok) else length(cell_candidates)
+
+  cs_pick <- cell_candidates[pick_idx]
+  b_pick <- bundles_vec[pick_idx]
+
+  grid_choice <- rbind(grid_choice, data.table(
+    city = city_id,
+    cell_size_m = cs_pick,
+    bundles = b_pick,
+    compression = nrow(dt) / b_pick
+  ))
+
+  cat(sprintf("[%s] bundles by cell: %s\n", city_id,
+              paste(sprintf("%dm=%d", cell_candidates, bundles_vec), collapse=" | ")))
+  cat(sprintf("[%s] PICK: %dm -> bundles=%d (compression=%0.2fx)\n\n",
+              city_id, cs_pick, b_pick, nrow(dt)/b_pick))
+}
+
+grid_choice
+############################################################
+# Step A2 — Re-aggregate with chosen per-city grid sizes
+#          + build X_scaled_agg for clustering
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# chosen grid sizes from A1b
+grid_size <- list(
+  berlin  = 800,
+  munich  = 600,
+  cologne = 400
+)
+
+aggregate_od_grid <- function(dt, cell_size_m) {
+  dt <- copy(dt)
+
+  dt[, `:=`(
+    ox = as.integer(floor(x_o / cell_size_m)),
+    oy = as.integer(floor(y_o / cell_size_m)),
+    dx = as.integer(floor(x_d / cell_size_m)),
+    dy = as.integer(floor(y_d / cell_size_m))
+  )]
+
+  # Aggregate by OD-cell pair; use cell centers as representative coords
+  agg <- dt[, .(
+    w = .N,
+    x_o = (median(ox) + 0.5) * cell_size_m,
+    y_o = (median(oy) + 0.5) * cell_size_m,
+    x_d = (median(dx) + 0.5) * cell_size_m,
+    y_d = (median(dy) + 0.5) * cell_size_m
+  ), by = .(ox, oy, dx, dy)]
+
+  setorder(agg, -w)
+  agg
+}
+
+od_agg <- list()
+X_scaled_agg <- list()
+
+cat("Re-aggregating with per-city grid sizes...\n")
+for (city_id in names(city_data)) {
+  cs <- grid_size[[city_id]]
+  dt <- city_data[[city_id]]
+
+  agg <- aggregate_od_grid(dt, cell_size_m = cs)
+  agg[, `:=`(city = city_id, cell_size_m = cs)]
+  od_agg[[city_id]] <- agg
+
+  X <- as.matrix(agg[, .(x_o, y_o, x_d, y_d)])
+  storage.mode(X) <- "double"
+  X_scaled_agg[[city_id]] <- scale(X)
+
+  cat(sprintf("[%s] cell=%dm | bundles=%d | top w=%d | total trips=%d\n",
+              city_id, cs, nrow(agg), agg$w[1], sum(agg$w)))
+}
+
+cat("Step A2 done.\n")
+############################################################
+# Step 2 — Build standardized 4D OD matrices (UTM)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# Use UTM projected coordinates (recommended for distance-based methods)
+od_cols_utm <- c("x_o", "y_o", "x_d", "y_d")
+
+assert_has_cols <- function(dt, cols, city_id) {
+  miss <- setdiff(cols, names(dt))
+  if (length(miss) > 0) {
+    stop(sprintf("City '%s' is missing columns: %s", city_id, paste(miss, collapse = ", ")))
+  }
+  invisible(TRUE)
+}
+
+make_od_matrix <- function(dt, cols = od_cols_utm) {
+  X <- as.matrix(dt[, ..cols])
+  storage.mode(X) <- "double"
+  X
+}
+
+# Build raw + scaled matrices per city (kept separate)
+X_raw <- list()
+X_scaled <- list()
+
+for (city_id in names(city_data)) {
+  dt <- city_data[[city_id]]
+  assert_has_cols(dt, od_cols_utm, city_id)
+
+  X <- make_od_matrix(dt, od_cols_utm)
+  X_raw[[city_id]] <- X
+  X_scaled[[city_id]] <- scale(X)  # standardize each city separately
+}
+
+cat("Step 2 done.\n")
+for (city_id in names(X_scaled)) {
+  cat(sprintf("- %s: X_scaled dim = %s\n", city_id, paste(dim(X_scaled[[city_id]]), collapse = " x ")))
+}
+############################################################
+# Step A3 — kSNN (mutual kNN + shared threshold) on aggregated bundles
+############################################################
+
+pkgs <- c("FNN", "igraph", "data.table")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(FNN)
+  library(igraph)
+  library(data.table)
+})
+
+set.seed(1)
+
+# --- kSNN parameters (start values)
+k <- 30
+snn_min_shared <- 10
+mutual <- TRUE
+min_cluster_size <- 20
+
+# Intersection count for sorted neighbor lists (k is small => fast)
+intersect_count_sorted <- function(a, b, k) {
+  ia <- 1L; ib <- 1L; cnt <- 0L
+  while (ia <= k && ib <= k) {
+    if (a[ia] == b[ib]) { cnt <- cnt + 1L; ia <- ia + 1L; ib <- ib + 1L
+    } else if (a[ia] < b[ib]) { ia <- ia + 1L
+    } else { ib <- ib + 1L }
+  }
+  cnt
+}
+
+# Build SNN edges only among kNN candidate pairs
+build_snn_edges <- function(nn_idx, snn_min_shared = 10, mutual = TRUE, verbose_every = 4000) {
+  n <- nrow(nn_idx)
+  k <- ncol(nn_idx)
+  nn_sorted <- t(apply(nn_idx, 1, sort))
+
+  from <- integer(0); to <- integer(0); w <- integer(0)
+
+  for (i in 1:n) {
+    Ni <- nn_sorted[i, ]
+    for (j in Ni) {
+      if (j <= i) next
+      if (mutual && !any(nn_sorted[j, ] == i)) next
+
+      shared <- intersect_count_sorted(Ni, nn_sorted[j, ], k)
+      if (shared >= snn_min_shared) {
+        from <- c(from, i)
+        to   <- c(to, j)
+        w    <- c(w, shared)
+      }
+    }
+    if (!is.null(verbose_every) && i %% verbose_every == 0L) {
+      cat(sprintf("  processed %d / %d (edges=%d)\n", i, n, length(from)))
+    }
+  }
+
+  data.table(from=from, to=to, w=w)
+}
+
+cluster_louvain_noise <- function(g, min_cluster_size = 20, seed = 1) {
+  set.seed(seed)
+  if (ecount(g) == 0) return(rep.int(-1L, vcount(g)))
+
+  comm <- cluster_louvain(g, weights = E(g)$weight)
+  cl <- as.integer(factor(membership(comm)))
+
+  tab <- table(cl)
+  small <- as.integer(names(tab[tab < min_cluster_size]))
+  if (length(small) > 0) {
+    cl[cl %in% small] <- -1L
+    keep <- cl != -1L
+    if (any(keep)) cl[keep] <- as.integer(factor(cl[keep]))
+  }
+  cl
+}
+
+# ---- Run per city
+cat("Running kSNN on aggregated bundles...\n")
+
+for (city_id in names(X_scaled_agg)) {
+  X <- X_scaled_agg[[city_id]]
+  n <- nrow(X)
+  kk <- min(k, n - 1L)
+
+  cat(sprintf("\n[%s] bundles=%d | k=%d | min_shared=%d\n", city_id, n, kk, snn_min_shared))
+
+  knn <- FNN::get.knn(X, k = kk)
+  edges <- build_snn_edges(knn$nn.index, snn_min_shared = snn_min_shared, mutual = mutual, verbose_every = 4000)
+
+  g <- graph_from_data_frame(edges[, .(from, to)], directed = FALSE, vertices = data.frame(name = 1:n))
+  E(g)$weight <- edges$w
+
+  cl <- cluster_louvain_noise(g, min_cluster_size = min_cluster_size, seed = 123)
+
+  n_clusters <- length(setdiff(unique(cl), -1L))
+  coverage_w <- sum(od_agg[[city_id]]$w[cl != -1L]) / sum(od_agg[[city_id]]$w)
+
+  cat(sprintf("[%s] edges=%d | clusters=%d | weighted coverage=%0.3f\n",
+              city_id, nrow(edges), n_clusters, coverage_w))
+
+  # attach cluster labels
+  od_agg[[city_id]][, cluster := cl]
+
+  rm(knn, edges, g, cl)
+  invisible(gc())
+}
+
+cat("\nStep A3 done.\n")
+############################################################
+# Step A4 — Directional cohesion (weighted) per city
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# Compute weighted directional cohesion for one city aggregated table
+directional_cohesion_city <- function(agg_dt) {
+  dt <- copy(agg_dt)
+
+  # direction vectors
+  dt[, `:=`(
+    vx = x_d - x_o,
+    vy = y_d - y_o
+  )]
+  dt[, vlen := sqrt(vx^2 + vy^2)]
+  dt <- dt[is.finite(vlen) & vlen > 0]
+
+  # unit direction
+  dt[, `:=`(ux = vx / vlen, uy = vy / vlen)]
+
+  # ignore noise if any (cluster == -1)
+  dt <- dt[cluster != -1]
+
+  # cluster-level resultant length (weighted)
+  cl_stats <- dt[, .(
+    w_sum = sum(w),
+    sx = sum(w * ux),
+    sy = sum(w * uy)
+  ), by = cluster]
+
+  cl_stats[, R := sqrt(sx^2 + sy^2) / w_sum]  # 0..1
+
+  # city-level cohesion: weight by cluster flow weight
+  city_cohesion <- cl_stats[, sum(w_sum * R) / sum(w_sum)]
+
+  list(city_cohesion = city_cohesion, cluster_table = cl_stats)
+}
+
+# Run for all cities + store results
+cohesion_results <- list()
+summary_table <- data.table(city=character(), weighted_coverage=numeric(),
+                            directional_cohesion=numeric(), n_clusters=integer())
+
+cat("Computing directional cohesion...\n")
+
+for (city_id in names(od_agg)) {
+  res <- directional_cohesion_city(od_agg[[city_id]])
+  cohesion_results[[city_id]] <- res
+
+  # metrics
+  dt <- od_agg[[city_id]]
+  cov_w <- sum(dt$w[dt$cluster != -1]) / sum(dt$w)
+  ncl <- length(setdiff(unique(dt$cluster), -1L))
+
+  summary_table <- rbind(
+    summary_table,
+    data.table(
+      city = city_id,
+      weighted_coverage = cov_w,
+      directional_cohesion = res$city_cohesion,
+      n_clusters = ncl
+    )
+  )
+
+  cat(sprintf("[%s] coverage_w=%0.4f | directional_cohesion=%0.4f | clusters=%d\n",
+              city_id, cov_w, res$city_cohesion, ncl))
+}
+
+summary_table
+############################################################
+# Step A5 — Build results table for Pareto / optimization
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# ---- Build results table
+results_snn <- data.table(
+  city = character(),
+  cell_size_m = integer(),
+  n_bundles = integer(),
+  k = integer(),
+  snn_min_shared = integer(),
+  min_cluster_size = integer(),
+  weighted_coverage = numeric(),
+  directional_cohesion = numeric(),
+  n_clusters = integer()
+)
+
+for (city_id in names(od_agg)) {
+
+  dt <- od_agg[[city_id]]
+
+  # metrics (already computed, but recompute safely)
+  weighted_coverage <- sum(dt$w[dt$cluster != -1]) / sum(dt$w)
+  n_clusters <- length(setdiff(unique(dt$cluster), -1L))
+
+  # directional cohesion (reuse Step A4 function logic)
+  dt2 <- copy(dt)
+  dt2[, `:=`(
+    vx = x_d - x_o,
+    vy = y_d - y_o
+  )]
+  dt2[, vlen := sqrt(vx^2 + vy^2)]
+  dt2 <- dt2[is.finite(vlen) & vlen > 0 & cluster != -1]
+  dt2[, `:=`(ux = vx / vlen, uy = vy / vlen)]
+
+  cl_stats <- dt2[, .(
+    w_sum = sum(w),
+    sx = sum(w * ux),
+    sy = sum(w * uy)
+  ), by = cluster]
+
+  cl_stats[, R := sqrt(sx^2 + sy^2) / w_sum]
+  directional_cohesion <- cl_stats[, sum(w_sum * R) / sum(w_sum)]
+
+  results_snn <- rbind(
+    results_snn,
+    data.table(
+      city = city_id,
+      cell_size_m = unique(dt$cell_size_m),
+      n_bundles = nrow(dt),
+      k = 30,
+      snn_min_shared = 10,
+      min_cluster_size = 20,
+      weighted_coverage = weighted_coverage,
+      directional_cohesion = directional_cohesion,
+      n_clusters = n_clusters
+    )
+  )
+}
+
+print(results_snn)
+############################################################
+# Step B1.1 — High-quality parameter search setup (2-stage)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(FNN)
+  library(igraph)
+})
+
+# ---------- 1) Stage-1 broad grid (quality-first, not tiny)
+# k controls neighborhood; min_shared controls strictness
+param_grid_stage1 <- CJ(
+  k = c(15, 20, 25, 30, 40, 50, 60),
+  snn_min_shared = c(6, 8, 10, 12, 15)
+)
+
+# Keep only feasible combos: min_shared must be < k
+param_grid_stage1 <- param_grid_stage1[snn_min_shared < k]
+nrow(param_grid_stage1)  # sanity: number of configs
+
+# ---------- 2) Core functions reused from Step A3/A4
+
+intersect_count_sorted <- function(a, b, k) {
+  ia <- 1L; ib <- 1L; cnt <- 0L
+  while (ia <= k && ib <= k) {
+    if (a[ia] == b[ib]) { cnt <- cnt + 1L; ia <- ia + 1L; ib <- ib + 1L
+    } else if (a[ia] < b[ib]) { ia <- ia + 1L
+    } else { ib <- ib + 1L }
+  }
+  cnt
+}
+
+build_snn_edges <- function(nn_idx, snn_min_shared = 10, mutual = TRUE) {
+  n <- nrow(nn_idx)
+  k <- ncol(nn_idx)
+  nn_sorted <- t(apply(nn_idx, 1, sort))
+
+  from <- integer(0); to <- integer(0); w <- integer(0)
+
+  for (i in 1:n) {
+    Ni <- nn_sorted[i, ]
+    for (j in Ni) {
+      if (j <= i) next
+      if (mutual && !any(nn_sorted[j, ] == i)) next
+
+      shared <- intersect_count_sorted(Ni, nn_sorted[j, ], k)
+      if (shared >= snn_min_shared) {
+        from <- c(from, i); to <- c(to, j); w <- c(w, shared)
+      }
+    }
+  }
+  data.table(from=from, to=to, w=w)
+}
+
+cluster_louvain_noise <- function(g, min_cluster_size = 20, seed = 1) {
+  set.seed(seed)
+  if (ecount(g) == 0) return(rep.int(-1L, vcount(g)))
+
+  comm <- cluster_louvain(g, weights = E(g)$weight)
+  cl <- as.integer(factor(membership(comm)))
+
+  tab <- table(cl)
+  small <- as.integer(names(tab[tab < min_cluster_size]))
+  if (length(small) > 0) {
+    cl[cl %in% small] <- -1L
+    keep <- cl != -1L
+    if (any(keep)) cl[keep] <- as.integer(factor(cl[keep]))
+  }
+  cl
+}
+
+directional_cohesion_weighted <- function(dt) {
+  dt2 <- copy(dt)
+  dt2[, `:=`(vx = x_d - x_o, vy = y_d - y_o)]
+  dt2[, vlen := sqrt(vx^2 + vy^2)]
+  dt2 <- dt2[is.finite(vlen) & vlen > 0 & cluster != -1]
+  dt2[, `:=`(ux = vx / vlen, uy = vy / vlen)]
+
+  cl_stats <- dt2[, .(
+    w_sum = sum(w),
+    sx = sum(w * ux),
+    sy = sum(w * uy)
+  ), by = cluster]
+
+  cl_stats[, R := sqrt(sx^2 + sy^2) / w_sum]
+  cl_stats[, sum(w_sum * R) / sum(w_sum)]
+}
+
+# ---------- 3) Evaluate one parameter setting for one city
+eval_one_setting <- function(city_id, X_scaled_agg, od_agg,
+                             k, snn_min_shared,
+                             mutual = TRUE, min_cluster_size = 20, seed = 123) {
+
+  X <- X_scaled_agg[[city_id]]
+  n <- nrow(X)
+  kk <- min(k, n - 1L)
+
+  knn <- FNN::get.knn(X, k = kk)
+
+  edges <- build_snn_edges(knn$nn.index, snn_min_shared = snn_min_shared, mutual = mutual)
+
+  g <- igraph::graph_from_data_frame(edges[, .(from, to)], directed = FALSE,
+                                     vertices = data.frame(name = 1:n))
+  igraph::E(g)$weight <- edges$w
+
+  cl <- cluster_louvain_noise(g, min_cluster_size = min_cluster_size, seed = seed)
+
+  # attach clusters temporarily (do NOT overwrite your baseline od_agg unless you want)
+  dt <- copy(od_agg[[city_id]])
+  dt[, cluster := cl]
+
+  coverage_w <- sum(dt$w[dt$cluster != -1]) / sum(dt$w)
+  coh <- directional_cohesion_weighted(dt)
+  ncl <- length(setdiff(unique(cl), -1L))
+
+  data.table(
+    city = city_id,
+    cell_size_m = unique(dt$cell_size_m),
+    n_bundles = nrow(dt),
+    k = kk,
+    snn_min_shared = snn_min_shared,
+    min_cluster_size = min_cluster_size,
+    mutual = mutual,
+    edges = nrow(edges),
+    n_clusters = ncl,
+    weighted_coverage = coverage_w,
+    directional_cohesion = coh
+  )
+}
+
+# ---------- 4) Safe runner: saves progress every 'save_every'
+run_stage <- function(city_ids, grid, X_scaled_agg, od_agg,
+                      outfile = "snn_stage1_results.rds",
+                      save_every = 5,
+                      mutual = TRUE, min_cluster_size = 20, seed = 123) {
+
+  results <- data.table()
+  run_count <- 0L
+
+  for (city_id in city_ids) {
+    cat(sprintf("\n=== CITY %s ===\n", toupper(city_id)))
+
+    for (i in 1:nrow(grid)) {
+      row <- grid[i]
+
+      cat(sprintf("[%s] %d/%d: k=%d, min_shared=%d\n",
+                  city_id, i, nrow(grid), row$k, row$snn_min_shared))
+
+      res <- eval_one_setting(
+        city_id = city_id,
+        X_scaled_agg = X_scaled_agg,
+        od_agg = od_agg,
+        k = row$k,
+        snn_min_shared = row$snn_min_shared,
+        mutual = mutual,
+        min_cluster_size = min_cluster_size,
+        seed = seed
+      )
+
+      results <- rbind(results, res)
+      run_count <- run_count + 1L
+
+      if (run_count %% save_every == 0L) {
+        saveRDS(results, outfile)
+        cat(sprintf("Saved progress: %s (rows=%d)\n", outfile, nrow(results)))
+      }
+
+      rm(res); invisible(gc())
+    }
+  }
+
+  saveRDS(results, outfile)
+  cat(sprintf("\nFinished. Saved: %s (rows=%d)\n", outfile, nrow(results)))
+  results
+}
+
+cat("Step B1.1 ready.\n")
+############################################################
+# Step B1.2b — FAST + EXACT Stage 1 using sparse tcrossprod
+# - exact shared-neighbor counts
+# - optional mutual kNN filter
+# - reuse computed shared counts for multiple min_shared thresholds
+############################################################
+
+pkgs <- c("FNN", "Matrix", "igraph", "data.table")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(FNN)
+  library(Matrix)
+  library(igraph)
+  library(data.table)
+})
+
+out_file <- "/content/drive/MyDrive/snn_stage1_results.rds"
+
+# split grid by k so we compute shared-count matrix once per k
+grid_by_k <- split(param_grid_stage1, by = "k", keep.by = FALSE)
+
+cluster_louvain_noise <- function(g, min_cluster_size = 20, seed = 123) {
+  set.seed(seed)
+  if (ecount(g) == 0) return(rep.int(-1L, vcount(g)))
+  comm <- cluster_louvain(g, weights = E(g)$weight)
+  cl <- as.integer(factor(membership(comm)))
+  tab <- table(cl)
+  small <- as.integer(names(tab[tab < min_cluster_size]))
+  if (length(small) > 0) {
+    cl[cl %in% small] <- -1L
+    keep <- cl != -1L
+    if (any(keep)) cl[keep] <- as.integer(factor(cl[keep]))
+  }
+  cl
+}
+
+directional_cohesion_weighted <- function(dt) {
+  dt2 <- copy(dt)
+  dt2[, `:=`(vx = x_d - x_o, vy = y_d - y_o)]
+  dt2[, vlen := sqrt(vx^2 + vy^2)]
+  dt2 <- dt2[is.finite(vlen) & vlen > 0 & cluster != -1]
+  dt2[, `:=`(ux = vx / vlen, uy = vy / vlen)]
+  cl_stats <- dt2[, .(
+    w_sum = sum(w),
+    sx = sum(w * ux),
+    sy = sum(w * uy)
+  ), by = cluster]
+  cl_stats[, R := sqrt(sx^2 + sy^2) / w_sum]
+  cl_stats[, sum(w_sum * R) / sum(w_sum)]
+}
+
+# Build shared-neighbor counts via sparse algebra (FAST)
+shared_edges_sparse <- function(nn_idx, n, mutual = TRUE) {
+  k <- ncol(nn_idx)
+
+  # neighbor membership M (n x n), M[i,j]=1 if j in kNN(i)
+  i <- rep(1:n, each = k)
+  j <- as.vector(t(nn_idx))
+  M <- sparseMatrix(i = i, j = j, x = 1L, dims = c(n, n))
+
+  # shared neighbor counts S = M %*% t(M)
+  S <- tcrossprod(M)
+  diag(S) <- 0
+
+  if (mutual) {
+    A <- M * t(M)   # mutual kNN adjacency (0/1)
+    S <- S * A      # keep shared counts only for mutual pairs
+  }
+
+  # extract edges (upper triangle only)
+  trip <- summary(S)  # i, j, x
+  trip <- as.data.table(trip)
+  setnames(trip, c("i","j","shared"))
+  trip <- trip[i < j]   # undirected unique edges
+
+  trip
+}
+
+stage1_res <- data.table()
+run_count <- 0L
+
+cat("Running FAST Stage 1 sweep (sparse exact SNN)...\n")
+
+for (city_id in names(X_scaled_agg)) {
+  X <- X_scaled_agg[[city_id]]
+  dt_base <- od_agg[[city_id]]
+  n <- nrow(X)
+
+  cat(sprintf("\n=== CITY %s (bundles=%d) ===\n", toupper(city_id), n))
+
+  for (k_val_chr in names(grid_by_k)) {
+    k_val <- as.integer(k_val_chr)
+    kk <- min(k_val, n - 1L)
+
+    cat(sprintf("[%s] k=%d: computing kNN...\n", city_id, kk))
+    knn <- FNN::get.knn(X, k = kk)
+
+    cat(sprintf("[%s] k=%d: building shared-neighbor edges via tcrossprod...\n", city_id, kk))
+    edges_all <- shared_edges_sparse(knn$nn.index, n = n, mutual = TRUE)
+    cat(sprintf("[%s] k=%d: candidate edges=%d\n", city_id, kk, nrow(edges_all)))
+
+    subgrid <- grid_by_k[[k_val_chr]]
+    for (ms in subgrid$snn_min_shared) {
+      edges <- edges_all[shared >= ms, .(from = i, to = j, w = shared)]
+
+      g <- graph_from_data_frame(edges[, .(from, to)], directed = FALSE,
+                                 vertices = data.frame(name = 1:n))
+      E(g)$weight <- edges$w
+
+      cl <- cluster_louvain_noise(g, min_cluster_size = 20, seed = 123)
+
+      dt <- copy(dt_base)
+      dt[, cluster := cl]
+
+      coverage_w <- sum(dt$w[dt$cluster != -1]) / sum(dt$w)
+      coh <- directional_cohesion_weighted(dt)
+      ncl <- length(setdiff(unique(cl), -1L))
+
+      res <- data.table(
+        city = city_id,
+        cell_size_m = unique(dt$cell_size_m),
+        n_bundles = n,
+        k = kk,
+        snn_min_shared = ms,
+        min_cluster_size = 20,
+        mutual = TRUE,
+        edges = nrow(edges),
+        n_clusters = ncl,
+        weighted_coverage = coverage_w,
+        directional_cohesion = coh
+      )
+
+      stage1_res <- rbind(stage1_res, res)
+      run_count <- run_count + 1L
+
+      cat(sprintf("[%s] k=%d ms=%d -> edges=%d clusters=%d cov=%0.3f coh=%0.3f\n",
+                  city_id, kk, ms, nrow(edges), ncl, coverage_w, coh))
+
+      if (run_count %% 3 == 0L) {
+        saveRDS(stage1_res, out_file)
+        cat(sprintf("Saved progress: %s (rows=%d)\n", out_file, nrow(stage1_res)))
+      }
+
+      rm(g, cl, dt, res)
+      invisible(gc())
+    }
+
+    rm(knn, edges_all)
+    invisible(gc())
+  }
+}
+
+saveRDS(stage1_res, out_file)
+cat(sprintf("\nDone. Saved: %s (rows=%d)\n", out_file, nrow(stage1_res)))
+
+stage1_res[, .(
+  n = .N,
+  cov_min = min(weighted_coverage),
+  cov_max = max(weighted_coverage),
+  coh_min = min(directional_cohesion),
+  coh_max = max(directional_cohesion)
+), by = city]
+############################################################
+# Step B1.3 (FIXED) — Clean results + Pareto fronts safely
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+in_file <- "/content/drive/MyDrive/snn_stage1_results.rds"
+res <- as.data.table(readRDS(in_file))
+
+# --- Clean objective columns
+# convert NaN/Inf to NA
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+
+# Keep only valid objective rows
+res_clean <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+cat("Rows total vs clean:\n")
+print(res_clean[, .(n_total = .N), by = city][order(city)])
+print(res[, .(n_total = .N), by = city][order(city)])
+
+# --- Robust Pareto for maximization (coverage, cohesion)
+pareto_max <- function(dt, obj1 = "weighted_coverage", obj2 = "directional_cohesion") {
+  X <- as.matrix(dt[, .(get(obj1), get(obj2))])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+
+  for (i in 1:n) {
+    if (!keep[i]) next
+    # if X[i,] is NA (shouldn't happen after cleaning), skip
+    if (any(!is.finite(X[i, ]))) { keep[i] <- FALSE; next }
+
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) & (X[,1] > X[i,1] | X[,2] > X[i,2])
+    dom[i] <- FALSE
+    # ignore comparisons where dom is NA
+    dom[!is.finite(dom)] <- FALSE
+
+    if (any(dom)) keep[i] <- FALSE
+  }
+
+  dt[keep]
+}
+
+pareto_dt <- res_clean[, pareto_max(.SD), by = city]
+
+cat("\nPareto points per city (cleaned):\n")
+print(pareto_dt[, .N, by = city])
+
+# --- Plot
+ggplot(res_clean, aes(x = weighted_coverage, y = directional_cohesion)) +
+  geom_point(alpha = 0.35) +
+  geom_point(data = pareto_dt, size = 2) +
+  facet_wrap(~ city, scales = "free") +
+  labs(title = "Stage 1 Pareto (cleaned): coverage vs directional cohesion",
+       x = "Weighted coverage", y = "Directional cohesion")
+############################################################
+# Step B1.4a — Build adaptive refinement grids from Pareto
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# Load cleaned results + Pareto points
+res <- as.data.table(readRDS("/content/drive/MyDrive/snn_stage1_results.rds"))
+
+# Clean again defensively
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto function (same as before)
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+           (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+
+pareto_dt <- res[, pareto_max(.SD), by = city]
+
+# ---- Build refinement grid per city
+refinement_grids <- list()
+
+for (city_id in unique(pareto_dt$city)) {
+  dt <- pareto_dt[city == city_id]
+
+  # parameter ranges actually used on Pareto front
+  k_vals <- sort(unique(dt$k))
+  ms_vals <- sort(unique(dt$snn_min_shared))
+
+  # expand ranges slightly (±1 step)
+  k_min <- max(min(k_vals) - 5, 10)
+  k_max <- max(k_vals) + 5
+
+  ms_min <- max(min(ms_vals) - 2, 2)
+  ms_max <- max(ms_vals) + 2
+
+  # dense local grid
+  grid <- CJ(
+    k = seq(k_min, k_max, by = 2),
+    snn_min_shared = seq(ms_min, ms_max, by = 1)
+  )[snn_min_shared < k]
+
+  refinement_grids[[city_id]] <- grid
+
+  cat(sprintf(
+    "\n[%s] Pareto k range: %d–%d | min_shared range: %d–%d | refinement configs=%d\n",
+    city_id, min(k_vals), max(k_vals), min(ms_vals), max(ms_vals), nrow(grid)
+  ))
+}
+
+refinement_grids
+############################################################
+# Step B1.4b — Pareto-guided refinement grid (along the front)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+# Load cleaned results and recompute Pareto
+res <- as.data.table(readRDS("/content/drive/MyDrive/snn_stage1_results.rds"))
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+           (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto_dt <- res[, pareto_max(.SD), by = city]
+
+# --- refinement settings (quality-first, still manageable)
+n_bins <- 6          # coverage bins along the front
+dk <- 4              # refine neighborhood around k
+dms <- 2             # refine neighborhood around min_shared
+k_step <- 1          # step size in refined grid
+ms_step <- 1
+
+build_refine_grid_city <- function(pdt_city) {
+  # Bin by coverage to spread refinement along the whole curve
+  pdt_city[, cov_bin := cut(weighted_coverage, breaks = n_bins, include.lowest = TRUE)]
+
+  # For each bin, pick the point with highest cohesion (best in that coverage band)
+  anchors <- pdt_city[, .SD[which.max(directional_cohesion)], by = cov_bin]
+
+  grids <- lapply(1:nrow(anchors), function(i) {
+    k0 <- anchors$k[i]
+    ms0 <- anchors$snn_min_shared[i]
+
+    CJ(
+      k = seq(max(10, k0 - dk), k0 + dk, by = k_step),
+      snn_min_shared = seq(max(2, ms0 - dms), ms0 + dms, by = ms_step)
+    )[snn_min_shared < k]
+  })
+
+  unique(rbindlist(grids))
+}
+
+refinement_grids2 <- list()
+for (city_id in unique(pareto_dt$city)) {
+  grid <- build_refine_grid_city(pareto_dt[city == city_id])
+  refinement_grids2[[city_id]] <- grid
+  cat(sprintf("[%s] Pareto-guided refinement configs = %d\n", city_id, nrow(grid)))
+}
+
+# Show one example grid (berlin)
+refinement_grids2[["berlin"]]
+############################################################
+# Step B1.4c — Execute Stage 2 refinement (append + dedupe)
+############################################################
+
+pkgs <- c("FNN", "Matrix", "igraph", "data.table")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(FNN)
+  library(Matrix)
+  library(igraph)
+  library(data.table)
+})
+
+stage1_file <- "/content/drive/MyDrive/snn_stage1_results.rds"
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+
+# Load existing results (clean later)
+stage1_res <- as.data.table(readRDS(stage1_file))
+
+cluster_louvain_noise <- function(g, min_cluster_size = 20, seed = 123) {
+  set.seed(seed)
+  if (ecount(g) == 0) return(rep.int(-1L, vcount(g)))
+  comm <- cluster_louvain(g, weights = E(g)$weight)
+  cl <- as.integer(factor(membership(comm)))
+  tab <- table(cl)
+  small <- as.integer(names(tab[tab < min_cluster_size]))
+  if (length(small) > 0) {
+    cl[cl %in% small] <- -1L
+    keep <- cl != -1L
+    if (any(keep)) cl[keep] <- as.integer(factor(cl[keep]))
+  }
+  cl
+}
+
+directional_cohesion_weighted <- function(dt) {
+  dt2 <- copy(dt)
+  dt2[, `:=`(vx = x_d - x_o, vy = y_d - y_o)]
+  dt2[, vlen := sqrt(vx^2 + vy^2)]
+  dt2 <- dt2[is.finite(vlen) & vlen > 0 & cluster != -1]
+  if (nrow(dt2) == 0) return(NA_real_)
+  dt2[, `:=`(ux = vx / vlen, uy = vy / vlen)]
+  cl_stats <- dt2[, .(
+    w_sum = sum(w),
+    sx = sum(w * ux),
+    sy = sum(w * uy)
+  ), by = cluster]
+  cl_stats[, R := sqrt(sx^2 + sy^2) / w_sum]
+  cl_stats[, sum(w_sum * R) / sum(w_sum)]
+}
+
+shared_edges_sparse <- function(nn_idx, n, mutual = TRUE) {
+  k <- ncol(nn_idx)
+  i <- rep(1:n, each = k)
+  j <- as.vector(t(nn_idx))
+  M <- sparseMatrix(i = i, j = j, x = 1L, dims = c(n, n))
+
+  S <- tcrossprod(M)
+  diag(S) <- 0
+  if (mutual) {
+    A <- M * t(M)
+    S <- S * A
+  }
+
+  trip <- as.data.table(summary(S))
+  setnames(trip, c("i","j","shared"))
+  trip <- trip[i < j]
+  trip
+}
+
+# Key to avoid reruns
+stage1_res[, key := paste(city, k, snn_min_shared, sep="|")]
+done_keys <- unique(stage1_res$key)
+
+stage2_new <- data.table()
+run_count <- 0L
+
+cat("Running Stage 2 refinement...\n")
+
+for (city_id in names(refinement_grids2)) {
+  grid <- as.data.table(refinement_grids2[[city_id]])
+  X <- X_scaled_agg[[city_id]]
+  dt_base <- od_agg[[city_id]]
+  n <- nrow(X)
+
+  cat(sprintf("\n=== CITY %s | refinement configs=%d ===\n", toupper(city_id), nrow(grid)))
+
+  # group by k to reuse kNN and shared edges
+  grid_by_k <- split(grid, by = "k", keep.by = FALSE)
+
+  for (k_chr in names(grid_by_k)) {
+    k_val <- as.integer(k_chr)
+    kk <- min(k_val, n - 1L)
+
+    cat(sprintf("[%s] k=%d: computing kNN + shared edges...\n", city_id, kk))
+    knn <- FNN::get.knn(X, k = kk)
+    edges_all <- shared_edges_sparse(knn$nn.index, n = n, mutual = TRUE)
+
+    ms_vals <- sort(unique(grid_by_k[[k_chr]]$snn_min_shared))
+    for (ms in ms_vals) {
+      key <- paste(city_id, kk, ms, sep="|")
+      if (key %in% done_keys) next  # already computed in stage 1
+
+      edges <- edges_all[shared >= ms, .(from = i, to = j, w = shared)]
+
+      g <- graph_from_data_frame(edges[, .(from, to)], directed = FALSE,
+                                 vertices = data.frame(name = 1:n))
+      E(g)$weight <- edges$w
+
+      cl <- cluster_louvain_noise(g, min_cluster_size = 20, seed = 123)
+
+      dt <- copy(dt_base)
+      dt[, cluster := cl]
+
+      coverage_w <- sum(dt$w[dt$cluster != -1]) / sum(dt$w)
+      coh <- directional_cohesion_weighted(dt)
+      ncl <- length(setdiff(unique(cl), -1L))
+
+      res <- data.table(
+        city = city_id,
+        cell_size_m = unique(dt$cell_size_m),
+        n_bundles = n,
+        k = kk,
+        snn_min_shared = ms,
+        min_cluster_size = 20,
+        mutual = TRUE,
+        edges = nrow(edges),
+        n_clusters = ncl,
+        weighted_coverage = coverage_w,
+        directional_cohesion = coh
+      )
+
+      stage2_new <- rbind(stage2_new, res)
+      run_count <- run_count + 1L
+
+      cat(sprintf("[%s] k=%d ms=%d -> edges=%d clusters=%d cov=%0.3f coh=%s\n",
+                  city_id, kk, ms, nrow(edges), ncl, coverage_w,
+                  ifelse(is.na(coh), "NA", sprintf("%0.3f", coh))))
+
+      if (run_count %% 10 == 0L) {
+        saveRDS(rbind(stage1_res[, !"key"], stage2_new, fill=TRUE), stage2_file)
+        cat(sprintf("Saved progress: %s (new rows=%d)\n", stage2_file, nrow(stage2_new)))
+      }
+
+      rm(g, cl, dt, res); invisible(gc())
+    }
+
+    rm(knn, edges_all); invisible(gc())
+  }
+}
+
+# Save final combined results
+combined <- rbind(stage1_res[, !"key"], stage2_new, fill = TRUE)
+saveRDS(combined, stage2_file)
+
+cat(sprintf("\nStage 2 complete. Saved combined results to: %s\n", stage2_file))
+cat(sprintf("Stage 1 rows=%d | Stage 2 new rows=%d | Combined=%d\n",
+            nrow(stage1_res), nrow(stage2_new), nrow(combined)))
+############################################################
+# Step B1.5 — Final Pareto fronts after refinement + overlay
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+stage1_file <- "/content/drive/MyDrive/snn_stage1_results.rds"
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+
+s1 <- as.data.table(readRDS(stage1_file))
+s2 <- as.data.table(readRDS(stage2_file))
+
+# --- clean objectives
+clean_obj <- function(dt) {
+  dt <- copy(dt)
+  dt[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+  dt[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+  dt <- dt[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+  dt
+}
+s1c <- clean_obj(s1)
+s2c <- clean_obj(s2)
+
+# --- pareto for max
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+           (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+
+pareto2 <- s2c[, pareto_max(.SD), by = city]
+
+cat("Pareto points after refinement:\n")
+print(pareto2[, .N, by = city])
+
+# label for plotting
+s1c[, stage := "Stage 1"]
+s2c[, stage := "Stage 2"]
+
+# plot
+p <- ggplot() +
+  geom_point(data = s1c, aes(weighted_coverage, directional_cohesion),
+             alpha = 0.25) +
+  geom_point(data = s2c, aes(weighted_coverage, directional_cohesion),
+             alpha = 0.25) +
+  geom_point(data = pareto2, aes(weighted_coverage, directional_cohesion),
+             size = 2.2) +
+  facet_wrap(~ city, scales = "free") +
+  labs(title = "Pareto fronts after Stage 2 refinement",
+       x = "Weighted coverage", y = "Directional cohesion") +
+  theme_bw()
+
+print(p)
+
+# Save as vector PDF (LNCS-friendly)
+pdf_out <- "/content/drive/MyDrive/pareto_stage2_refined.pdf"
+ggsave(pdf_out, p, width = 8.5, height = 8.5, device = cairo_pdf)
+cat(sprintf("\nSaved: %s\n", pdf_out))
+############################################################
+# Step B1.5b — Make Pareto points visible (jitter + optional labels)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+s2 <- as.data.table(readRDS(stage2_file))
+
+# clean
+s2[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+s2[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+s2 <- s2[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# pareto
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] > X[i,1] | X[,2] > X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto2 <- s2[, pareto_max(.SD), by = city]
+
+# Add a short label for debugging/inspection
+pareto2[, lab := sprintf("k=%d,ms=%d", k, snn_min_shared)]
+
+# Plot (jitter only for display)
+p_vis <- ggplot() +
+  geom_point(data = s2,
+             aes(weighted_coverage, directional_cohesion),
+             alpha = 0.18, size = 1.3) +
+  geom_point(data = pareto2,
+             aes(weighted_coverage, directional_cohesion),
+             size = 2.8) +
+  geom_point(data = pareto2,
+             aes(weighted_coverage, directional_cohesion),
+             position = position_jitter(width = 0.004, height = 0.004),
+             size = 2.8, alpha = 0.85) +
+  facet_wrap(~ city, scales = "free") +
+  theme_bw() +
+  labs(title = "Pareto fronts (Stage 2) — jittered Pareto points for visibility",
+       x = "Weighted coverage", y = "Directional cohesion")
+
+print(p_vis)
+############################################################
+# Plot Pareto front as a connected line (paper-style)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+s2 <- as.data.table(readRDS(stage2_file))
+
+# clean objectives
+s2[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+s2[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+s2 <- s2[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto (max, max)
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] > X[i,1] | X[,2] > X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto2 <- s2[, pareto_max(.SD), by = city]
+
+# Build a "front line": sort by coverage and enforce monotone (non-increasing)
+make_front_line <- function(dt_city) {
+  d <- copy(dt_city)
+  setorder(d, -weighted_coverage, -directional_cohesion)  # high coverage to low
+  # enforce non-decreasing cohesion as coverage decreases (clean frontier)
+  d[, coh_front := cummax(directional_cohesion)]
+  # keep only points that are on the upper envelope
+  d <- d[directional_cohesion == coh_front]
+  d[, coh_front := NULL]
+  d
+}
+
+front_line <- pareto2[, make_front_line(.SD), by = city]
+
+# Plot: background + Pareto points + connected front
+p_front <- ggplot() +
+  geom_point(data = s2, aes(weighted_coverage, directional_cohesion),
+             alpha = 0.15, size = 1.2) +
+  geom_line(data = front_line, aes(weighted_coverage, directional_cohesion),
+            linewidth = 1) +
+  geom_point(data = pareto2, aes(weighted_coverage, directional_cohesion),
+             size = 2.6) +
+  facet_wrap(~ city, scales = "free") +
+  theme_bw() +
+  labs(
+    title = "Pareto front (connected) — coverage vs directional cohesion",
+    x = "Weighted coverage",
+    y = "Directional cohesion"
+  )
+
+print(p_front)
+
+# Optional: save vector PDF for the report
+pdf_out <- "/content/drive/MyDrive/pareto_front_connected.pdf"
+ggsave(pdf_out, p_front, width = 8.5, height = 8.5)
+cat(sprintf("Saved: %s\n", pdf_out))
+############################################################
+# Pareto front ONLY (no background, paper-clean)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+s2 <- as.data.table(readRDS(stage2_file))
+
+# clean objectives
+s2[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+s2[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+s2 <- s2[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] > X[i,1] | X[,2] > X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto2 <- s2[, pareto_max(.SD), by = city]
+
+# Build connected front
+make_front_line <- function(dt_city) {
+  d <- copy(dt_city)
+  setorder(d, -weighted_coverage, -directional_cohesion)
+  d[, coh_front := cummax(directional_cohesion)]
+  d <- d[directional_cohesion == coh_front]
+  d[, coh_front := NULL]
+  d
+}
+front_line <- pareto2[, make_front_line(.SD), by = city]
+
+# Plot only front + Pareto points
+p_clean <- ggplot() +
+  geom_line(data = front_line,
+            aes(weighted_coverage, directional_cohesion),
+            linewidth = 1.1) +
+  geom_point(data = pareto2,
+             aes(weighted_coverage, directional_cohesion),
+             size = 3) +
+  facet_wrap(~ city, scales = "free") +
+  theme_bw() +
+  labs(
+    title = "Pareto front (Stage 2, no background)",
+    x = "Weighted coverage",
+    y = "Directional cohesion"
+  )
+
+print(p_clean)
+
+# Save as vector PDF
+pdf_out <- "/content/drive/MyDrive/pareto_front_no_background.pdf"
+ggsave(pdf_out, p_clean, width = 8.5, height = 8.5)
+cat(sprintf("Saved: %s\n", pdf_out))
+############################################################
+# Step B1.6 — Hypervolume (2D) for MAX objectives, ref=(0,0)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+res <- as.data.table(readRDS(stage2_file))
+
+# Clean objectives
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto (max,max)
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto_dt <- res[, pareto_max(.SD), by = city]
+
+# --- 2D Hypervolume for maximization with ref=(0,0)
+# HV = union area of rectangles [0,x]x[0,y] for Pareto points.
+hv2d_max_ref00 <- function(dt_city) {
+  d <- unique(dt_city[, .(x = weighted_coverage, y = directional_cohesion)])
+  # keep only within [0,1] just in case
+  d <- d[x >= 0 & x <= 1 & y >= 0 & y <= 1]
+  if (nrow(d) == 0) return(0)
+
+  # for each x, keep best y (upper envelope at that x)
+  d <- d[, .(y = max(y)), by = x]
+  setorder(d, x)  # ascending x
+
+  # envelope height for each x-interval: y_env[i] = max(y[j] for j>=i)
+  d[, y_env := rev(cummax(rev(y)))]
+
+  # HV as step function area from 0 to max x
+  x0 <- 0
+  hv <- 0
+  for (i in 1:nrow(d)) {
+    hv <- hv + (d$x[i] - x0) * d$y_env[i]
+    x0 <- d$x[i]
+  }
+  hv
+}
+
+hv_table <- pareto_dt[, .(
+  hv = hv2d_max_ref00(.SD),
+  n_pareto = .N
+), by = city][order(-hv)]
+
+print(hv_table)
+
+# optional bar plot
+p_hv <- ggplot(hv_table, aes(x = city, y = hv)) +
+  geom_col() +
+  theme_bw() +
+  labs(title = "Hypervolume (ref = (0,0)) from refined Pareto fronts",
+       x = "City", y = "Hypervolume (0..1)")
+
+print(p_hv)
+
+# save plot
+pdf_out <- "/content/drive/MyDrive/hypervolume_stage2.pdf"
+ggsave(pdf_out, p_hv, width = 6.5, height = 4.5)
+cat(sprintf("Saved: %s\n", pdf_out))
+############################################################
+# Step B2.1 — Knee point detection (distance-to-ideal line)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+res <- as.data.table(readRDS(stage2_file))
+
+# Clean objectives
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto (max,max)
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  n <- nrow(X)
+  keep <- rep(TRUE, n)
+  for (i in 1:n) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    dom[!is.finite(dom)] <- FALSE
+    if (any(dom)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto_dt <- res[, pareto_max(.SD), by = city]
+
+# Distance to ideal diagonal (0,0)-(1,1)
+knee_dt <- pareto_dt[, {
+  x <- weighted_coverage
+  y <- directional_cohesion
+  # distance to line y=x
+  dist <- abs(y - x) / sqrt(2)
+  .SD[which.max(dist)]
+}, by = city]
+
+# Keep only key fields
+knee_table <- knee_dt[, .(
+  city,
+  k,
+  snn_min_shared,
+  weighted_coverage,
+  directional_cohesion,
+  n_clusters,
+  dist_to_diagonal = abs(directional_cohesion - weighted_coverage) / sqrt(2)
+)]
+
+print(knee_table)
+
+# Save for reporting
+saveRDS(knee_table, "/content/drive/MyDrive/knee_points_stage2.rds")
+############################################################
+# B2.2 — Pareto front with knee highlighted (no background)
+############################################################
+
+library(ggplot2)
+
+p_knee <- ggplot() +
+  geom_line(data = pareto_dt,
+            aes(weighted_coverage, directional_cohesion),
+            linewidth = 0.9) +
+  geom_point(data = pareto_dt,
+             aes(weighted_coverage, directional_cohesion),
+             size = 2) +
+  geom_point(data = knee_dt,
+             aes(weighted_coverage, directional_cohesion),
+             size = 4, shape = 21, fill = "white", stroke = 1.3) +
+  facet_wrap(~ city, scales = "free") +
+  theme_bw() +
+  labs(
+    title = "Knee points on refined Pareto fronts",
+    x = "Weighted coverage",
+    y = "Directional cohesion"
+  )
+
+print(p_knee)
+
+ggsave("/content/drive/MyDrive/knee_points.pdf",
+       p_knee, width = 8.5, height = 8.5)
+############################################################
+# B2.3 — Coverage-aware knee (closest to ideal point)
+############################################################
+
+library(data.table)
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+res <- as.data.table(readRDS(stage2_file))
+
+# clean
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# Pareto
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  keep <- rep(TRUE, nrow(X))
+  for (i in seq_len(nrow(X))) {
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+           (X[,1] >  X[i,1] | X[,2] >  X[i,2])
+    dom[i] <- FALSE
+    if (any(dom, na.rm = TRUE)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+pareto_dt <- res[, pareto_max(.SD), by = city]
+
+# Ideal-point knee
+knee_ideal <- pareto_dt[, {
+  dist <- sqrt((1 - weighted_coverage)^2 + (1 - directional_cohesion)^2)
+  .SD[which.min(dist)]
+}, by = city]
+
+knee_ideal[, dist_to_ideal :=
+             sqrt((1 - weighted_coverage)^2 + (1 - directional_cohesion)^2)]
+
+print(knee_ideal[, .(
+  city, k, snn_min_shared,
+  weighted_coverage, directional_cohesion,
+  n_clusters, dist_to_ideal
+)])
+############################################################
+# Step C1 — Map ideal-point knee clusters (one PDF per city)
+############################################################
+
+pkgs <- c("data.table", "FNN", "Matrix", "igraph", "ggplot2")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(FNN)
+  library(Matrix)
+  library(igraph)
+  library(ggplot2)
+})
+
+# ---- Ideal-point knee parameters you computed
+knee_params <- data.table(
+  city = c("berlin","munich","cologne"),
+  k = c(34, 11, 19),
+  snn_min_shared = c(16, 4, 9)
+)
+
+# ---- kSNN building blocks (same as your fast pipeline)
+
+cluster_louvain_noise <- function(g, min_cluster_size = 20, seed = 123) {
+  set.seed(seed)
+  if (ecount(g) == 0) return(rep.int(-1L, vcount(g)))
+  comm <- cluster_louvain(g, weights = E(g)$weight)
+  cl <- as.integer(factor(membership(comm)))
+  tab <- table(cl)
+  small <- as.integer(names(tab[tab < min_cluster_size]))
+  if (length(small) > 0) {
+    cl[cl %in% small] <- -1L
+    keep <- cl != -1L
+    if (any(keep)) cl[keep] <- as.integer(factor(cl[keep]))
+  }
+  cl
+}
+
+shared_edges_sparse <- function(nn_idx, n, mutual = TRUE) {
+  k <- ncol(nn_idx)
+  i <- rep(1:n, each = k)
+  j <- as.vector(t(nn_idx))
+  M <- sparseMatrix(i = i, j = j, x = 1L, dims = c(n, n))
+
+  S <- tcrossprod(M)
+  diag(S) <- 0
+  if (mutual) {
+    A <- M * t(M)
+    S <- S * A
+  }
+
+  trip <- as.data.table(summary(S))
+  setnames(trip, c("i","j","shared"))
+  trip <- trip[i < j]
+  trip
+}
+
+run_ksnn_city <- function(city_id, k, min_shared,
+                          X_scaled_agg, od_agg,
+                          mutual = TRUE, min_cluster_size = 20, seed = 123) {
+
+  X <- X_scaled_agg[[city_id]]
+  dt <- copy(od_agg[[city_id]])
+  n <- nrow(X)
+  kk <- min(as.integer(k), n - 1L)
+
+  cat(sprintf("\n[%s] Running knee kSNN: k=%d, min_shared=%d, n=%d\n",
+              city_id, kk, min_shared, n))
+
+  knn <- FNN::get.knn(X, k = kk)
+  edges_all <- shared_edges_sparse(knn$nn.index, n = n, mutual = mutual)
+  edges <- edges_all[shared >= min_shared, .(from = i, to = j, w = shared)]
+
+  g <- graph_from_data_frame(edges[, .(from, to)], directed = FALSE,
+                             vertices = data.frame(name = 1:n))
+  E(g)$weight <- edges$w
+
+  cl <- cluster_louvain_noise(g, min_cluster_size = min_cluster_size, seed = seed)
+  dt[, cluster := cl]
+
+  dt
+}
+
+# ---- Plotting helper
+plot_city_clusters <- function(dt, city_id,
+                               top_k_clusters = 12,
+                               max_segments = 20000,
+                               out_dir = "/content/drive/MyDrive") {
+
+  # Ensure weight column exists
+  if (!("w" %in% names(dt))) dt[, w := 1]
+
+  # Cluster weights (exclude noise)
+  clw <- dt[cluster != -1, .(w_sum = sum(w)), by = cluster][order(-w_sum)]
+  top <- clw[1:min(.N, top_k_clusters), cluster]
+
+  dt_plot <- copy(dt)
+
+  # group clusters into top / other / noise
+  dt_plot[, cluster_grp := fifelse(cluster == -1, "Noise",
+                           fifelse(cluster %in% top, paste0("C", cluster), "Other"))]
+
+  # downsample for plotting (weight-aware-ish: prefer heavier edges)
+  # take top by weight, then random sample remainder if needed
+  setorder(dt_plot, -w)
+  if (nrow(dt_plot) > max_segments) {
+    keep_n <- max_segments
+    dt_plot <- dt_plot[1:keep_n]
+  }
+
+  p <- ggplot(dt_plot) +
+    geom_segment(
+      aes(x = x_o, y = y_o, xend = x_d, yend = y_d, colour = cluster_grp),
+      alpha = 0.35, linewidth = 0.25
+    ) +
+    coord_equal() +
+    theme_bw() +
+    labs(
+      title = sprintf("%s — kSNN clusters (ideal-point knee)", toupper(city_id)),
+      subtitle = sprintf("Top %d clusters by weight + Other + Noise | bundles shown: %d",
+                         top_k_clusters, nrow(dt_plot)),
+      x = "UTM x", y = "UTM y", colour = "Cluster"
+    )
+
+  out_pdf <- file.path(out_dir, sprintf("knee_clusters_map_%s.pdf", city_id))
+  ggsave(out_pdf, p, width = 7.5, height = 7.5)
+  cat(sprintf("Saved map: %s\n", out_pdf))
+
+  invisible(p)
+}
+
+# ---- Run for all 3 cities + save PDFs
+knee_clustered <- list()
+
+for (i in 1:nrow(knee_params)) {
+  city_id <- knee_params$city[i]
+  k <- knee_params$k[i]
+  ms <- knee_params$snn_min_shared[i]
+
+  dt_city <- run_ksnn_city(
+    city_id = city_id, k = k, min_shared = ms,
+    X_scaled_agg = X_scaled_agg, od_agg = od_agg,
+    mutual = TRUE, min_cluster_size = 20, seed = 123
+  )
+
+  knee_clustered[[city_id]] <- dt_city
+
+  # map (UTM space)
+  plot_city_clusters(dt_city, city_id,
+                     top_k_clusters = 12,
+                     max_segments = 20000,
+                     out_dir = "/content/drive/MyDrive")
+}
+
+# Optional: save clustered bundles for later analysis
+saveRDS(knee_clustered, "/content/drive/MyDrive/knee_clustered_bundles.rds")
+cat("Saved clustered bundle list: /content/drive/MyDrive/knee_clustered_bundles.rds\n")
+############################################################
+# Step C2 — Corridor plot (cluster-level OD arrows)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+knee_clustered <- readRDS("/content/drive/MyDrive/knee_clustered_bundles.rds")
+
+plot_corridors <- function(dt, city_id, top_clusters = 15,
+                           out_dir = "/content/drive/MyDrive") {
+
+  dt <- as.data.table(dt)
+  if (!("w" %in% names(dt))) dt[, w := 1]
+
+  # keep clustered bundles only
+  dtc <- dt[cluster != -1]
+
+  # cluster weights
+  clw <- dtc[, .(w_sum = sum(w)), by = cluster][order(-w_sum)]
+  top <- clw[1:min(.N, top_clusters), cluster]
+
+  # corridor endpoints = weighted centroid origin & destination per cluster
+  corr <- dtc[cluster %in% top, .(
+    w_sum = sum(w),
+    xo = sum(w * x_o) / sum(w),
+    yo = sum(w * y_o) / sum(w),
+    xd = sum(w * x_d) / sum(w),
+    yd = sum(w * y_d) / sum(w)
+  ), by = cluster][order(-w_sum)]
+
+  # label clusters for legend
+  corr[, cluster_lab := paste0("C", cluster)]
+
+  p <- ggplot(corr) +
+    geom_segment(
+      aes(x = xo, y = yo, xend = xd, yend = yd, linewidth = w_sum, colour = cluster_lab),
+      arrow = arrow(length = unit(0.12, "inches")),
+      alpha = 0.85
+    ) +
+    coord_equal() +
+    theme_bw() +
+    labs(
+      title = sprintf("%s - Knee solution: main flow corridors", toupper(city_id)),
+      subtitle = sprintf("Top %d clusters by aggregated weight", top_clusters),
+      x = "UTM x", y = "UTM y",
+      colour = "Cluster", linewidth = "Cluster weight"
+    )
+
+  pdf_out <- file.path(out_dir, sprintf("knee_corridors_%s.pdf", city_id))
+  ggsave(pdf_out, p, width = 7.5, height = 7.5)
+  cat("Saved corridor PDF:", pdf_out, "\n")
+
+  p
+}
+
+# create corridor plots
+plots <- list()
+for (city_id in names(knee_clustered)) {
+  plots[[city_id]] <- plot_corridors(knee_clustered[[city_id]], city_id, top_clusters = 15)
+  print(plots[[city_id]])
+}
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+knee_clustered <- readRDS("/content/drive/MyDrive/knee_clustered_bundles.rds")
+city_id <- "cologne"
+dt <- as.data.table(knee_clustered[[city_id]])
+if (!("w" %in% names(dt))) dt[, w := 1]
+
+top_k <- 8
+top <- dt[cluster != -1, .(w_sum=sum(w)), by=cluster][order(-w_sum)][1:top_k, cluster]
+
+dtp <- dt[cluster %in% top]
+setorder(dtp, -w)
+dtp <- dtp[, head(.SD, 1200), by=cluster]  # 1200 segments per cluster
+
+p <- ggplot(dtp) +
+  geom_segment(aes(x=x_o, y=y_o, xend=x_d, yend=y_d),
+               alpha=0.22, linewidth=0.25) +
+  facet_wrap(~ cluster, scales="free") +
+  theme_bw() +
+  labs(
+    title = toupper(city_id),
+    subtitle = sprintf("Ideal-knee: top %d clusters, 1200 segments each (free scales)", top_k),
+    x="UTM x", y="UTM y"
+  )
+
+print(p)
+ggsave(sprintf("/content/drive/MyDrive/knee_segments_facet_%s.pdf", city_id),
+       p, width=10, height=8)
+############################################################
+# C3.1 — Clean corridor plots (top N, numbered, minimal legend)
+############################################################
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+})
+
+knee_clustered <- readRDS("/content/drive/MyDrive/knee_clustered_bundles.rds")
+
+make_corridors <- function(dt, top_n = 8) {
+  dt <- as.data.table(dt)
+  if (!("w" %in% names(dt))) dt[, w := 1]
+  dt <- dt[cluster != -1]
+
+  clw <- dt[, .(w_sum = sum(w)), by = cluster][order(-w_sum)]
+  top <- clw[1:min(.N, top_n), cluster]
+
+  corr <- dt[cluster %in% top, .(
+    w_sum = sum(w),
+    xo = sum(w * x_o) / sum(w),
+    yo = sum(w * y_o) / sum(w),
+    xd = sum(w * x_d) / sum(w),
+    yd = sum(w * y_d) / sum(w)
+  ), by = cluster][order(-w_sum)]
+
+  # rank for labels 1..N
+  corr[, rank := .I]
+  # label position at mid-point
+  corr[, `:=`(xm = (xo + xd)/2, ym = (yo + yd)/2)]
+  corr
+}
+
+plot_corridors_clean <- function(corr, city_id, out_dir="/content/drive/MyDrive") {
+  p <- ggplot(corr) +
+    geom_segment(
+      aes(x = xo, y = yo, xend = xd, yend = yd, linewidth = w_sum),
+      arrow = arrow(length = unit(0.12, "inches")),
+      alpha = 0.9
+    ) +
+    geom_text(aes(x = xm, y = ym, label = rank), size = 4) +
+    coord_equal() +
+    theme_bw() +
+    theme(legend.position = "right") +
+    labs(
+      title = sprintf("%s - Main OD corridors (ideal-knee)", toupper(city_id)),
+      subtitle = "Top corridors ranked by total weight (numbers on arrows)",
+      x = "UTM x", y = "UTM y", linewidth = "Corridor weight"
+    )
+
+  pdf_out <- file.path(out_dir, sprintf("knee_corridors_clean_%s.pdf", city_id))
+  ggsave(pdf_out, p, width = 7.5, height = 7.5)
+  cat("Saved:", pdf_out, "\n")
+  p
+}
+
+for (city_id in names(knee_clustered)) {
+  corr <- make_corridors(knee_clustered[[city_id]], top_n = 8)
+  print(plot_corridors_clean(corr, city_id))
+}
+############################################################
+# B3.1 — NSGA-II robustness check using precomputed SNN results
+# - uses snn_stage2_results.rds as fitness oracle
+# - shows if NSGA-II can recover the Pareto structure efficiently
+############################################################
+
+pkgs <- c("data.table", "ggplot2", "mco")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(mco)
+})
+
+stage2_file <- "/content/drive/MyDrive/snn_stage2_results.rds"
+res <- as.data.table(readRDS(stage2_file))
+
+# Clean objectives
+res[!is.finite(weighted_coverage), weighted_coverage := NA_real_]
+res[!is.finite(directional_cohesion), directional_cohesion := NA_real_]
+res <- res[!is.na(weighted_coverage) & !is.na(directional_cohesion)]
+
+# True Pareto from full table (max,max)
+pareto_max <- function(dt) {
+  X <- as.matrix(dt[, .(weighted_coverage, directional_cohesion)])
+  keep <- rep(TRUE, nrow(X))
+  for (i in seq_len(nrow(X))) {
+    if (!keep[i]) next
+    dom <- (X[,1] >= X[i,1] & X[,2] >= X[i,2]) &
+      (X[,1] > X[i,1] | X[,2] > X[i,2])
+    dom[i] <- FALSE
+    if (any(dom, na.rm=TRUE)) keep[i] <- FALSE
+  }
+  dt[keep]
+}
+true_pareto <- res[, pareto_max(.SD), by=city]
+
+# 2D hypervolume for MAX w/ ref=(0,0) (same as your B1.6)
+hv2d_max_ref00 <- function(dt_city) {
+  d <- unique(dt_city[, .(x = weighted_coverage, y = directional_cohesion)])
+  d <- d[x>=0 & x<=1 & y>=0 & y<=1]
+  if (nrow(d) == 0) return(0)
+  d <- d[, .(y = max(y)), by = x]
+  setorder(d, x)
+  d[, y_env := rev(cummax(rev(y)))]
+  x0 <- 0; hv <- 0
+  for (i in 1:nrow(d)) {
+    hv <- hv + (d$x[i] - x0) * d$y_env[i]
+    x0 <- d$x[i]
+  }
+  hv
+}
+
+# --- NSGA-II robustness runner (oracle-based)
+run_nsga2_oracle <- function(city_id, res_city, popsize=60, generations=60, seed=123) {
+
+  dt <- copy(res_city)
+  # only keep unique (k, ms) combos
+  dt <- unique(dt, by=c("k","snn_min_shared"))
+
+  # bounds for search
+  k_min <- min(dt$k); k_max <- max(dt$k)
+  ms_min <- min(dt$snn_min_shared); ms_max <- max(dt$snn_min_shared)
+
+  # Fast lookup: map k|ms -> (cov,coh)
+  dt[, key := paste(k, snn_min_shared, sep="|")]
+  cov_map <- setNames(dt$weighted_coverage, dt$key)
+  coh_map <- setNames(dt$directional_cohesion, dt$key)
+
+  # helper: snap proposed (k,ms) to nearest EXISTING combo (important!)
+  combos <- dt[, .(k, ms = snn_min_shared)]
+  snap_to_existing <- function(kv, msv) {
+    # nearest by Manhattan distance in (k,ms)
+    d <- abs(combos$k - kv) + abs(combos$ms - msv)
+    j <- which.min(d)
+    c(combos$k[j], combos$ms[j])
+  }
+
+  # mco::nsga2 minimizes -> we maximize by returning negative
+  fn <- function(x) {
+    kv <- as.integer(round(x[1]))
+    msv <- as.integer(round(x[2]))
+
+    # clamp into bounds
+    kv <- max(k_min, min(k_max, kv))
+    msv <- max(ms_min, min(ms_max, msv))
+
+    # snap to an actually-evaluated config
+    snapped <- snap_to_existing(kv, msv)
+    kv <- snapped[1]; msv <- snapped[2]
+
+    key <- paste(kv, msv, sep="|")
+    cov <- cov_map[[key]]
+    coh <- coh_map[[key]]
+
+    # if something weird happens, penalize
+    if (is.null(cov) || is.null(coh) || !is.finite(cov) || !is.finite(coh)) {
+      return(c(1e6, 1e6))
+    }
+
+    # minimize negative to maximize original
+    c(-cov, -coh)
+  }
+
+  set.seed(seed)
+  ns <- mco::nsga2(
+    fn,
+    idim = 2,
+    odim = 2,
+    lower.bounds = c(k_min, ms_min),
+    upper.bounds = c(k_max, ms_max),
+    popsize = popsize,
+    generations = generations
+  )
+
+  # Extract solutions and snap to existing configs
+  sol <- as.data.table(ns$value)
+  setnames(sol, c("f1","f2"))
+  par <- as.data.table(ns$par)
+  setnames(par, c("k_raw","ms_raw"))
+  out <- cbind(par, sol)
+
+  out[, k := as.integer(round(k_raw))]
+  out[, snn_min_shared := as.integer(round(ms_raw))]
+
+  # snap again to existing + attach true cov/coh
+  out[, c("k","snn_min_shared") := {
+    s <- snap_to_existing(k, snn_min_shared)
+    .(s[1], s[2])
+  }, by = 1:nrow(out)]
+
+  out <- unique(out[, .(k, snn_min_shared)])
+  out[, key := paste(k, snn_min_shared, sep="|")]
+  out[, `:=`(
+    weighted_coverage = as.numeric(cov_map[key]),
+    directional_cohesion = as.numeric(coh_map[key])
+  )]
+  out[, city := city_id]
+
+  # NSGA-II nondominated subset (in original objective space)
+  out_nd <- pareto_max(out)
+
+  list(all = out, nd = out_nd)
+}
+
+# --- Run per city
+cities <- sort(unique(res$city))
+nsga_runs <- list()
+
+for (city_id in cities) {
+  cat("\nRunning NSGA-II oracle for:", city_id, "\n")
+  tmp <- run_nsga2_oracle(
+    city_id,
+    res[city == city_id],
+    popsize = 60,
+    generations = 60,
+    seed = 123
+  )
+  nsga_runs[[city_id]] <- tmp
+}
+
+nsga_nd <- rbindlist(lapply(nsga_runs, `[[`, "nd"), use.names=TRUE, fill=TRUE)
+
+# --- Compare HV of NSGA-II front vs true front
+hv_compare <- rbindlist(lapply(cities, function(city_id) {
+  true_city <- true_pareto[city == city_id]
+  nsga_city <- nsga_nd[city == city_id]
+
+  data.table(
+    city = city_id,
+    hv_true = hv2d_max_ref00(true_city),
+    hv_nsga = hv2d_max_ref00(nsga_city),
+    hv_ratio = hv2d_max_ref00(nsga_city) / hv2d_max_ref00(true_city),
+    n_true = nrow(true_city),
+    n_nsga = nrow(nsga_city)
+  )
+}))[order(-hv_ratio)]
+
+print(hv_compare)
+
+# --- Plot: true Pareto vs NSGA-II recovered front
+p <- ggplot() +
+  geom_point(data = res, aes(weighted_coverage, directional_cohesion),
+             alpha = 0.08, size = 1) +
+  geom_point(data = true_pareto, aes(weighted_coverage, directional_cohesion),
+             size = 2.2) +
+  geom_point(data = nsga_nd, aes(weighted_coverage, directional_cohesion),
+             shape = 4, stroke = 1.1, size = 2.6) +
+  facet_wrap(~ city, scales = "free") +
+  theme_bw() +
+  labs(
+    title = "NSGA-II robustness check (oracle-based) — recovered vs true Pareto",
+    subtitle = "Black dots: true Pareto from full evaluation | X marks: NSGA-II recovered nondominated set",
+    x = "Weighted coverage", y = "Directional cohesion"
+  )
+
+print(p)
+ggsave("/content/drive/MyDrive/nsga2_oracle_vs_true_pareto.pdf", p, width=8.5, height=8.5)
+cat("Saved: /content/drive/MyDrive/nsga2_oracle_vs_true_pareto.pdf\n")
+############################################################
+# Step D1 (FIXED) — DBCV for ideal-knee clusterings
+############################################################
+
+pkgs <- c("data.table", "dbscan")
+to_install <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+if (length(to_install) > 0) install.packages(to_install)
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dbscan)
+})
+
+knee_clustered <- readRDS("/content/drive/MyDrive/knee_clustered_bundles.rds")
+
+stopifnot(exists("X_scaled_agg"))
+
+# robust extractor for dbcv return value
+extract_dbcv_numeric <- function(val) {
+  if (is.numeric(val) && length(val) == 1) return(as.numeric(val))
+  if (is.list(val)) {
+    # common field names seen across versions
+    for (nm in c("DBCV", "dbcv", "score", "value")) {
+      if (!is.null(val[[nm]]) && is.numeric(val[[nm]]) && length(val[[nm]]) == 1) {
+        return(as.numeric(val[[nm]]))
+      }
+    }
+  }
+  # last resort
+  suppressWarnings({
+    vv <- as.numeric(val)
+    if (is.numeric(vv) && length(vv) == 1 && is.finite(vv)) return(vv)
+  })
+  NA_real_
+}
+
+compute_city_dbcv <- function(city_id, dt_city, X_scaled_agg) {
+  X <- X_scaled_agg[[city_id]]
+  stopifnot(nrow(X) == nrow(dt_city))
+
+  cl <- as.integer(dt_city$cluster)
+  cl[cl < 0] <- 0L  # noise=0 for dbcv()
+
+  n_clusters <- length(setdiff(unique(cl), 0L))
+  if (n_clusters < 2) {
+    return(data.table(
+      city = city_id,
+      dbcv = NA_real_,
+      n_points = nrow(X),
+      n_clusters = n_clusters,
+      noise_share = mean(cl == 0L)
+    ))
+  }
+
+  val <- dbscan::dbcv(X, cl)
+  score <- extract_dbcv_numeric(val)
+
+  data.table(
+    city = city_id,
+    dbcv = score,
+    n_points = nrow(X),
+    n_clusters = n_clusters,
+    noise_share = mean(cl == 0L)
+  )
+}
+
+dbcv_table <- rbindlist(lapply(names(knee_clustered), function(city_id) {
+  compute_city_dbcv(city_id, as.data.table(knee_clustered[[city_id]]), X_scaled_agg)
+}))[order(-dbcv)]
+
+print(dbcv_table)
+
+saveRDS(dbcv_table, "/content/drive/MyDrive/dbcv_knee_solutions.rds")
+fwrite(dbcv_table, "/content/drive/MyDrive/dbcv_knee_solutions.csv")
+cat("Saved:\n- /content/drive/MyDrive/dbcv_knee_solutions.rds\n- /content/drive/MyDrive/dbcv_knee_solutions.csv\n")
