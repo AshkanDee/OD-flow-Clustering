@@ -899,3 +899,388 @@ for (city_id in names(decoded_clusters)) {
   cat("\nBest coverage solution (top 10 clusters):\n")
   print(head(tab_best_cov, 10))
 }
+
+############################################################
+# Step 28 — Covered demand of selected Pareto solutions (per city)
+############################################################
+
+covered_demand <- list()
+
+for (city_id in names(solution_tables)) {
+
+  tab_best_dir <- solution_tables[[city_id]]$best_direction
+  tab_knee     <- solution_tables[[city_id]]$knee_solution
+  tab_best_cov <- solution_tables[[city_id]]$best_coverage
+
+  cov_best_dir <- sum(tab_best_dir$size)
+  cov_knee     <- sum(tab_knee$size)
+  cov_best_cov <- sum(tab_best_cov$size)
+
+  covered_demand[[city_id]] <- c(
+    best_direction = cov_best_dir,
+    knee_solution  = cov_knee,
+    best_coverage  = cov_best_cov
+  )
+
+  cat("\n====================\n")
+  cat("CITY:", toupper(city_id), "\n")
+  cat("====================\n")
+  cat("Covered demand (sum of cluster sizes):\n")
+  cat("  Best direction :", cov_best_dir, "\n")
+  cat("  Knee solution  :", cov_knee, "\n")
+  cat("  Best coverage  :", cov_best_cov, "\n")
+}
+
+############################################################
+# Step 29 — Visualize knee solution flow corridors (per city)
+############################################################
+
+library(ggplot2)
+
+for (city_id in names(solution_tables)) {
+
+  cs  <- cluster_summaries[[city_id]]
+  sel <- decoded_clusters[[city_id]]$knee_solution
+
+  plot_df <- cs %>%
+    dplyr::filter(cluster %in% sel) %>%
+    dplyr::mutate(
+      x1 = mean_x_o,
+      y1 = mean_y_o,
+      x2 = mean_x_o + mean_dx,
+      y2 = mean_y_o + mean_dy
+    )
+
+  p <- ggplot(plot_df) +
+    geom_segment(
+      aes(x = x1, y = y1, xend = x2, yend = y2, linewidth = size),
+      arrow = arrow(length = unit(0.15, "cm"))
+    ) +
+    scale_linewidth_continuous(range = c(0.3, 1.5)) +
+    labs(
+      title = paste("Knee solution: selected flow corridors |", toupper(city_id)),
+      x = "x",
+      y = "y"
+    ) +
+    theme_minimal()
+
+  print(p)
+}
+
+############################################################
+# Step 30 — Scaled visualization of knee flow corridors (per city)
+############################################################
+
+library(ggplot2)
+
+scale_factor <- 0.5   # shorten arrows for visual clarity
+
+for (city_id in names(solution_tables)) {
+
+  cs  <- cluster_summaries[[city_id]]
+  sel <- decoded_clusters[[city_id]]$knee_solution
+
+  plot_df <- cs %>%
+    dplyr::filter(cluster %in% sel) %>%
+    dplyr::mutate(
+      x1 = mean_x_o,
+      y1 = mean_y_o,
+      x2 = mean_x_o + scale_factor * mean_dx,
+      y2 = mean_y_o + scale_factor * mean_dy
+    )
+
+  p <- ggplot(plot_df) +
+    geom_segment(
+      aes(x = x1, y = y1, xend = x2, yend = y2, linewidth = size),
+      arrow = arrow(length = unit(0.15, "cm"))
+    ) +
+    coord_equal() +
+    scale_linewidth_continuous(range = c(0.3, 1.5)) +
+    labs(
+      title = paste("Knee solution: selected flow corridors |", toupper(city_id)),
+      x = "Easting (m)",
+      y = "Northing (m)"
+    ) +
+    theme_minimal()
+
+  print(p)
+}
+
+############################################################
+# Step 31 — Percent coverage + cross-city summary table
+############################################################
+
+library(dplyr)
+
+# 1) Total clustered demand per city (after noise removal + size>=10 filter, etc.)
+total_clustered_by_city <- sapply(names(cluster_summaries), function(city_id) {
+  sum(cluster_summaries[[city_id]]$size, na.rm = TRUE)
+})
+
+# 2) Build one summary table: absolute + percent coverage for each solution
+summary_table <- dplyr::bind_rows(lapply(names(solution_tables), function(city_id) {
+
+  tabs <- solution_tables[[city_id]]
+
+  cov_best_dir <- sum(tabs$best_direction$size, na.rm = TRUE)
+  cov_knee     <- sum(tabs$knee_solution$size,  na.rm = TRUE)
+  cov_best_cov <- sum(tabs$best_coverage$size,  na.rm = TRUE)
+
+  total_clustered <- total_clustered_by_city[[city_id]]
+
+  data.frame(
+    city = city_id,
+    total_clustered_demand = total_clustered,
+
+    covered_best_direction = cov_best_dir,
+    pct_best_direction = 100 * cov_best_dir / total_clustered,
+
+    covered_knee = cov_knee,
+    pct_knee = 100 * cov_knee / total_clustered,
+
+    covered_best_coverage = cov_best_cov,
+    pct_best_coverage = 100 * cov_best_cov / total_clustered
+  )
+}))
+
+# Pretty print
+summary_table <- summary_table %>%
+  arrange(city)
+
+print(summary_table)
+
+############################################################
+# Step HV-RANDOM — Hypervolume of random baseline fronts (normalized)
+############################################################
+
+# Build global min/max using BOTH NSGA Pareto + Random samples (fair comparison)
+all_for_norm <- do.call(rbind, c(
+  lapply(names(pareto_summaries), function(city_id) {
+    df <- pareto_summaries[[city_id]][, c("covered_demand","dir_concentration")]
+    df
+  }),
+  lapply(names(vals_samples), function(city_id) {
+    df <- vals_samples[[city_id]][, c("covered_demand","dir_concentration")]
+    df
+  })
+))
+
+x_min <- min(all_for_norm$covered_demand, na.rm = TRUE)
+x_max <- max(all_for_norm$covered_demand, na.rm = TRUE)
+y_min <- min(all_for_norm$dir_concentration, na.rm = TRUE)
+y_max <- max(all_for_norm$dir_concentration, na.rm = TRUE)
+
+safe_norm <- function(z, zmin, zmax) {
+  if (!is.finite(zmin) || !is.finite(zmax) || isTRUE(all.equal(zmax, zmin))) return(rep(0, length(z)))
+  (z - zmin) / (zmax - zmin)
+}
+
+ref_min <- c(1.05, 1.05)
+
+hv_random_city <- function(df_city) {
+  x_n <- safe_norm(df_city$covered_demand, x_min, x_max)
+  y_n <- safe_norm(df_city$dir_concentration, y_min, y_max)
+  Fmin <- cbind(1 - x_n, 1 - y_n)
+  hv2d_min(Fmin, ref_min) / (1.05^2)   # scaled to [0,1]
+}
+
+hv_random_df <- do.call(rbind, lapply(names(vals_samples), function(city_id) {
+  df <- vals_samples[[city_id]]
+  data.frame(
+    city = city_id,
+    hv_random_scaled = hv_random_city(df),
+    n_points = nrow(df)
+  )
+}))
+
+print(hv_random_df)
+
+############################################################
+# Step HV-COMPARE — Random vs NSGA-II (DBSCAN) hypervolume
+############################################################
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+hv_nsga_df <- hv_dbscan_df %>%
+  dplyr::select(city, hv_nsga_scaled = hypervolume_scaled)
+
+hv_compare <- hv_nsga_df %>%
+  left_join(hv_random_df %>% dplyr::select(city, hv_random_scaled), by = "city") %>%
+  pivot_longer(cols = c(hv_random_scaled, hv_nsga_scaled),
+               names_to = "method", values_to = "hv_scaled") %>%
+  mutate(method = recode(method,
+                         hv_random_scaled = "Random baseline",
+                         hv_nsga_scaled   = "NSGA-II (DBSCAN)"))
+
+ggplot(hv_compare, aes(x = city, y = hv_scaled, fill = method)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Hypervolume improvement from random sampling to NSGA-II",
+    x = "City",
+    y = "Hypervolume (scaled to [0,1])",
+    fill = NULL
+  ) +
+  theme_minimal()
+
+############################################################
+# Step HV-DBSCAN — Pure R hypervolume for 2D Pareto fronts
+# (works in Colab, no packages)
+############################################################
+
+# --- Helper: non-dominated filter for MINIMIZATION
+nondominated_min <- function(F) {
+  n <- nrow(F)
+  keep <- rep(TRUE, n)
+  for (i in seq_len(n)) {
+    if (!keep[i]) next
+    for (j in seq_len(n)) {
+      if (i == j || !keep[i]) next
+      # j dominates i if j <= i in all and < in at least one
+      if (all(F[j, ] <= F[i, ]) && any(F[j, ] < F[i, ])) {
+        keep[i] <- FALSE
+      }
+    }
+  }
+  F[keep, , drop = FALSE]
+}
+
+# --- Helper: exact 2D dominated hypervolume for MINIMIZATION
+# Assumes ref is WORSE (larger) than all points in both dimensions.
+hv2d_min <- function(F, ref) {
+  if (nrow(F) == 0) return(0)
+
+  # Ensure non-dominated and sort by f1 ascending
+  F <- nondominated_min(F)
+  o <- order(F[, 1], F[, 2])
+  F <- F[o, , drop = FALSE]
+
+  hv <- 0
+  h  <- ref[2]  # running "ceiling" in f2
+  for (i in seq_len(nrow(F))) {
+    f1 <- F[i, 1]
+    f2 <- F[i, 2]
+    if (f2 < h) {
+      hv <- hv + (ref[1] - f1) * (h - f2)
+      h  <- f2
+    }
+  }
+  hv
+}
+
+# --- 1) Build global normalization bounds across ALL cities (DBSCAN)
+all_pareto <- do.call(rbind, lapply(names(pareto_summaries), function(city_id) {
+  df <- pareto_summaries[[city_id]][, c("covered_demand", "dir_concentration")]
+  df <- df[is.finite(df$covered_demand) & is.finite(df$dir_concentration), , drop = FALSE]
+  df
+}))
+
+x_min <- min(all_pareto$covered_demand, na.rm = TRUE)
+x_max <- max(all_pareto$covered_demand, na.rm = TRUE)
+y_min <- min(all_pareto$dir_concentration, na.rm = TRUE)
+y_max <- max(all_pareto$dir_concentration, na.rm = TRUE)
+
+safe_norm <- function(z, zmin, zmax) {
+  if (!is.finite(zmin) || !is.finite(zmax) || isTRUE(all.equal(zmax, zmin))) return(rep(0, length(z)))
+  (z - zmin) / (zmax - zmin)
+}
+
+# --- 2) Hypervolume per city (normalized)
+# Convert maximize (x,y) -> minimize (1-x, 1-y); ref slightly > 1 is safely worse
+ref_min <- c(1.05, 1.05)
+
+hv_dbscan_df <- do.call(rbind, lapply(names(pareto_summaries), function(city_id) {
+
+  df <- pareto_summaries[[city_id]][, c("covered_demand", "dir_concentration")]
+  df <- df[is.finite(df$covered_demand) & is.finite(df$dir_concentration), , drop = FALSE]
+
+  x_n <- safe_norm(df$covered_demand, x_min, x_max)
+  y_n <- safe_norm(df$dir_concentration, y_min, y_max)
+
+  # minimization front
+  Fmin <- cbind(f1 = 1 - x_n, f2 = 1 - y_n)
+
+  data.frame(
+    city = city_id,
+    n_points = nrow(df),
+    hypervolume_norm = hv2d_min(Fmin, ref_min)
+  )
+}))
+
+hv_dbscan_df <- hv_dbscan_df[order(-hv_dbscan_df$hypervolume_norm), ]
+print(hv_dbscan_df)
+
+hv_dbscan_df$hypervolume_scaled <- hv_dbscan_df$hypervolume_norm / (1.05^2)
+hv_dbscan_df <- hv_dbscan_df[order(-hv_dbscan_df$hypervolume_scaled), ]
+print(hv_dbscan_df)
+
+range_df <- dplyr::bind_rows(lapply(names(pareto_summaries), function(city_id) {
+  df <- pareto_summaries[[city_id]]
+  data.frame(
+    city = city_id,
+    cov_min = min(df$covered_demand, na.rm = TRUE),
+    cov_max = max(df$covered_demand, na.rm = TRUE),
+    dir_min = min(df$dir_concentration, na.rm = TRUE),
+    dir_max = max(df$dir_concentration, na.rm = TRUE)
+  )
+}))
+print(range_df)
+
+hv_city_scaled <- function(df) {
+  x <- df$covered_demand; y <- df$dir_concentration
+  x_n <- (x - min(x)) / (max(x) - min(x))
+  y_n <- (y - min(y)) / (max(y) - min(y))
+  Fmin <- cbind(1 - x_n, 1 - y_n)
+  hv <- hv2d_min(Fmin, ref = c(1.05, 1.05))
+  hv / (1.05^2)
+}
+
+hv_shape_df <- dplyr::bind_rows(lapply(names(pareto_summaries), function(city_id) {
+  data.frame(
+    city = city_id,
+    hypervolume_shape_scaled = hv_city_scaled(pareto_summaries[[city_id]])
+  )
+})) %>% dplyr::arrange(desc(hypervolume_shape_scaled))
+
+print(hv_shape_df)
+
+############################################################
+# Plot — DBSCAN Hypervolume (global-normalized)
+############################################################
+
+library(ggplot2)
+library(dplyr)
+
+hv_plot_df <- hv_dbscan_df %>%
+  mutate(city = factor(city, levels = city[order(hypervolume_scaled, decreasing = TRUE)]))
+
+ggplot(hv_plot_df, aes(x = city, y = hypervolume_scaled)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "DBSCAN Pareto front quality by hypervolume",
+    x = "City",
+    y = "Hypervolume (scaled to [0,1])"
+  ) +
+  theme_minimal()
+
+############################################################
+# Plot — DBSCAN Hypervolume (city-normalized shape)
+############################################################
+
+ggplot(hv_shape_df, aes(x = reorder(city, -hypervolume_shape_scaled),
+                         y = hypervolume_shape_scaled)) +
+  geom_col(fill = "darkorange") +
+  labs(
+    title = "DBSCAN Pareto front shape by hypervolume (city-normalized)",
+    x = "City",
+    y = "Hypervolume (scaled to [0,1])"
+  ) +
+  theme_minimal()
+
+# Check ranges
+range(pareto_summaries$berlin$covered_demand)
+range(vals_samples$berlin$covered_demand)
+
+range(pareto_summaries$berlin$dir_concentration)
+range(vals_samples$berlin$dir_concentration)
