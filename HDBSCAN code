@@ -1,0 +1,1534 @@
+############################################################
+# Step 0/1 — Mount Drive + Load + inspect all cities (no combining)
+#
+# WHY:
+# - If Drive isn't mounted, Colab can't see /content/drive/...
+# - We verify each path exists (fail fast, examiner-friendly)
+# - We keep each city separate for clean cross-city comparison
+############################################################
+
+from google.colab import drive
+drive.mount("/content/drive")
+
+!pip -q install pyreadr pandas
+
+import os
+import pyreadr
+import pandas as pd
+
+city_paths = {
+    "berlin":  "/content/drive/MyDrive/berlin_flows_utm.rds",
+    "munich":  "/content/drive/MyDrive/munich_flows_utm.rds",
+    "cologne": "/content/drive/MyDrive/cologne_flows_utm.rds",
+}
+
+# Normalize keys (prevents KeyError due to accidental capitalization/spaces)
+city_paths = {k.strip().lower(): v for k, v in city_paths.items()}
+
+city_data = {}
+
+for city_id, path in city_paths.items():
+    if not os.path.exists(path):
+        print(f"[MISSING] {city_id}: {path}")
+        continue
+
+    rds_obj = pyreadr.read_r(path)
+    df = next(iter(rds_obj.values()))
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"[{city_id}] RDS did not contain a DataFrame. Found: {type(df)}")
+
+    df = df.copy()
+    df["city"] = city_id  # traceability tag
+    city_data[city_id] = df
+
+# ---- Print inspection for each city
+print("\nLoaded cities:", list(city_data.keys()))
+
+for city_id, df in city_data.items():
+    print("\n=============================")
+    print("CITY:", city_id.upper())
+    print("=============================")
+    print("type():", type(df))
+    print("shape:", df.shape)
+    print("columns:", list(df.columns))
+
+############################################################
+# Step 1 — Load + inspect all cities (no combining)
+#
+# WHY:
+# - Quick schema check across cities in one run
+# - Confirms consistency before you start clustering
+# - Does NOT merge/stack datasets (each city stays separate)
+############################################################
+
+!pip -q install pyreadr pandas
+
+import os
+import pyreadr
+import pandas as pd
+
+# --- City paths (edit if needed)
+city_paths = {
+    "berlin":  "/content/drive/MyDrive/berlin_flows_utm.rds",
+    "munich":  "/content/drive/MyDrive/munich_flows_utm.rds",
+    "cologne": "/content/drive/MyDrive/cologne_flows_utm.rds",
+}
+
+# Store each city separately (no combining)
+city_data = {}
+
+for city_id, path in city_paths.items():
+    # WHY: Fail fast if a file path is wrong (Colab Drive paths are easy to mistype)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"[{city_id}] File not found: {path}")
+
+    # Read .rds (expects a single object; we take the first object inside)
+    rds_obj = pyreadr.read_r(path)
+    df = next(iter(rds_obj.values()))
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"[{city_id}] RDS did not contain a DataFrame. Found: {type(df)}")
+
+    # Traceability tag (kept even though datasets are separate)
+    df = df.copy()
+    df["city"] = city_id
+
+    city_data[city_id] = df
+
+# ---- Print inspection for each city
+for city_id, df in city_data.items():
+    print("\n=============================")
+    print("CITY:", city_id.upper())
+    print("=============================")
+
+    print("type():")
+    print(type(df))
+
+    print("\nshape (rows, cols):")
+    print(df.shape)
+
+    print("\ncolumns:")
+    print(list(df.columns))
+
+############################################################
+# Step 0 — Install & import required Python packages
+#
+# WHY:
+# - Python Colab environment does not persist packages
+# - These libraries replace dbscan + dplyr + ggplot2 in R
+# - Installed once per session, then imported normally
+############################################################
+
+!pip -q install hdbscan pandas numpy matplotlib scikit-learn
+
+import numpy as np
+import pandas as pd
+import hdbscan
+import matplotlib.pyplot as plt
+
+print("type(city_data):", type(city_data))
+print("city_data exists:", "city_data" in globals())
+
+try:
+    print("len(city_data):", len(city_data))
+    print("city_data keys:", list(city_data.keys()))
+except Exception as e:
+    print("Problem inspecting city_data:", repr(e))
+############################################################
+# Step 2 — Structural correction + scaling (per city)
+#
+# WHAT this step produces:
+# - X_scaled: scaled feature matrix for clustering
+# - city_clean: filtered dataset aligned with X_scaled rows
+#
+# Key decisions (explicit WHY):
+# - Drop rows with NA in clustering features because distance-based
+#   clustering cannot handle missing values reliably.
+# - Scale features because DBSCAN/HDBSCAN use distance computations;
+#   scaling prevents any one dimension from dominating due to units/magnitude.
+############################################################
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+
+def make_X_and_clean(city_df: pd.DataFrame,
+                     feature_cols=("x_o", "y_o", "dx", "dy")):
+    # WHY: fail fast if a city has a different schema (examiner-friendly)
+    missing_cols = [c for c in feature_cols if c not in city_df.columns]
+    if len(missing_cols) > 0:
+        raise KeyError(f"Missing required columns: {', '.join(missing_cols)}")
+
+    # Build feature matrix (generalized)
+    X = city_df.loc[:, feature_cols].to_numpy(dtype=float)
+
+    # Drop rows with any NA in features
+    ok = np.isfinite(X).all(axis=1)
+
+    # Scale only the valid rows
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X[ok, :])
+
+    # Keep dataset aligned with X_scaled rows
+    city_clean = city_df.loc[ok, :].copy()
+
+    return {
+        "X": X,
+        "ok": ok,
+        "X_scaled": X_scaled,
+        "city_clean": city_clean,
+        "scaler": scaler  # optional, but helpful for traceability/reuse
+    }
+
+
+# ---- Run for all cities (no combining)
+# Assumes you already created: city_data["berlin"], city_data["munich"], city_data["cologne"]
+prepared = {}
+for city_id, df in city_data.items():
+    res = make_X_and_clean(df)
+    res["city_id"] = city_id
+    prepared[city_id] = res
+
+# ---- Optional: keep Berlin-style objects for existing code compatibility
+berlin_clean  = prepared["berlin"]["city_clean"]
+munich_clean  = prepared["munich"]["city_clean"]
+cologne_clean = prepared["cologne"]["city_clean"]
+
+X_scaled_berlin  = prepared["berlin"]["X_scaled"]
+X_scaled_munich  = prepared["munich"]["X_scaled"]
+X_scaled_cologne = prepared["cologne"]["X_scaled"]
+
+
+# Quick audit print (helps you catch NA issues early)
+for city_id in prepared.keys():
+    print(f"\n--- {city_id.upper()} ---")
+    print("Rows original:", city_data[city_id].shape[0])
+    print("Rows kept:",     prepared[city_id]["city_clean"].shape[0])
+    print("Rows dropped:",  int((~prepared[city_id]["ok"]).sum()))
+    print("X_scaled dim:",  prepared[city_id]["X_scaled"].shape)
+print(prepared.keys())
+############################################################
+# Schema validation — confirm required columns exist
+#
+# WHY:
+# - Multi-city pipelines silently fail if schemas differ
+# - Explicit validation improves reproducibility and traceability
+# - This step guarantees that subsequent feature construction
+#   (x_o, y_o, dx, dy) is well-defined for all cities
+############################################################
+
+REQUIRED_COLS = {"x_o", "y_o", "dx", "dy"}
+
+for city_id, df in city_data.items():
+    missing = REQUIRED_COLS.difference(df.columns)
+
+    print("\n-----------------------------")
+    print("CITY:", city_id.upper())
+    print("-----------------------------")
+
+    if missing:
+        raise KeyError(f"[{city_id}] Missing required columns: {missing}")
+    else:
+        print("✓ Required columns present:", sorted(REQUIRED_COLS))
+        print("Rows:", df.shape[0])
+berlin = prepared["berlin"]["city_clean"]
+FEATURE_COLS = ["x_o", "y_o", "x_d", "y_d"]
+
+missing = set(FEATURE_COLS) - set(berlin.columns)
+if missing:
+    raise KeyError(f"Missing OD columns: {missing}")
+
+X = berlin[FEATURE_COLS].to_numpy(dtype=float)
+def build_X_for_city(city_id, city_source):
+    FEATURE_COLS = ["x_o", "y_o", "x_d", "y_d"]
+
+    missing = set(FEATURE_COLS) - set(city_source.columns)
+    if missing:
+        raise KeyError(f"[{city_id}] Missing OD columns: {missing}")
+
+    return city_source[FEATURE_COLS].to_numpy(dtype=float)
+
+
+X_berlin = build_X_for_city("berlin", prepared["berlin"]["city_clean"])
+X_munich = build_X_for_city("munich", prepared["munich"]["city_clean"])
+X_cologne = build_X_for_city("cologne", prepared["cologne"]["city_clean"])
+############################################################
+# HDBSCAN grid runner (FINAL, POLISHED)
+#
+# WHY this exists:
+# - Centralizes HDBSCAN execution
+# - Guarantees traceability (city + minPts)
+# - Avoids duplicated logic across cities
+############################################################
+
+import numpy as np
+import pandas as pd
+import hdbscan
+
+MINPTS_GRID = [10, 15, 20, 25, 30, 50]
+
+def run_hdbscan_grid(city_id, X_scaled):
+    """
+    Runs HDBSCAN over a minPts grid for one city.
+
+    Parameters
+    ----------
+    city_id : str
+        City identifier (e.g. 'berlin')
+    X_scaled : np.ndarray
+        Scaled OD feature matrix (rows aligned with city_clean)
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per minPts with basic clustering statistics
+    """
+
+    results = []
+
+    for minPts in MINPTS_GRID:
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=minPts,
+            min_samples=minPts,  # conservative choice (explicit in report)
+            metric="euclidean",
+            cluster_selection_method="eom",
+            core_dist_n_jobs=-1
+        )
+
+        labels = clusterer.fit_predict(X_scaled)
+
+        # Convert: noise = 0, clusters start at 1
+        cluster = np.where(labels < 0, 0, labels + 1)
+
+        noise_share = (cluster == 0).mean()
+        n_clusters = len(np.unique(cluster)) - (1 if 0 in cluster else 0)
+
+        results.append({
+            "city": city_id,
+            "algorithm": "HDBSCAN",
+            "minPts": minPts,
+            "n_clusters": n_clusters,
+            "noise_share": noise_share,
+            "clustered_share": 1.0 - noise_share
+        })
+
+        print(
+            f"[{city_id.upper()}] HDBSCAN done | minPts={minPts} | "
+            f"clusters={n_clusters} | noise={noise_share:.3f}"
+        )
+
+    return pd.DataFrame(results)
+print([k for k in globals().keys() if "scaled" in k.lower()])
+X_scaled = {
+    "berlin":  X_scaled_berlin,
+    "munich":  X_scaled_munich,
+    "cologne": X_scaled_cologne
+}
+
+all_res = []
+for city_id in ["berlin", "munich", "cologne"]:
+    all_res.append(run_hdbscan_grid(city_id, X_scaled[city_id]))
+
+hdbscan_res_scaledOD4 = pd.concat(all_res, ignore_index=True)
+display(hdbscan_res_scaledOD4)
+OD4_COLS = ["x_o","y_o","x_d","y_d"]
+
+def dup_od_share(df):
+    n = len(df)
+    n_unique = df[OD4_COLS].drop_duplicates().shape[0]
+    return 1 - (n_unique / n)
+
+for city_id in ["berlin","munich","cologne"]:
+    df = prepared[city_id]["city_clean"]
+    print(city_id, "duplicate OD share:", round(dup_od_share(df), 4))
+for city_id in ["berlin","munich","cologne"]:
+    df = prepared[city_id]["city_clean"]
+    uo = df[["x_o","y_o"]].drop_duplicates().shape[0]
+    ud = df[["x_d","y_d"]].drop_duplicates().shape[0]
+    print(city_id, "unique origins:", uo, "| unique destinations:", ud)
+############################################################
+# Step 4 — Directional cohesion (valid clusters only)
+#
+# WHAT this produces:
+# - weighted directional cohesion per (city, minPts)
+#
+# Key decisions (WHY):
+# - Noise points (cluster=0) are excluded: they have no cluster direction.
+# - Very small clusters are excluded to avoid unstable direction estimates.
+# - Cohesion is weighted by cluster size to reflect explanatory importance.
+############################################################
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+
+MIN_CLUSTER_SIZE_FOR_COHESION = 10
+
+def compute_weighted_directional_cohesion(df_city, cluster_labels):
+    """
+    df_city: cleaned city dataframe (aligned with cluster_labels)
+    cluster_labels: array with noise=0, clusters >=1
+    """
+
+    # --- build unit direction vectors
+    dx = df_city["x_d"].to_numpy() - df_city["x_o"].to_numpy()
+    dy = df_city["y_d"].to_numpy() - df_city["y_o"].to_numpy()
+    norms = np.sqrt(dx**2 + dy**2)
+    norms[norms == 0] = 1.0  # avoid division by zero
+    U = np.column_stack([dx / norms, dy / norms])
+
+    df_tmp = pd.DataFrame({
+        "cluster": cluster_labels,
+        "ux": U[:, 0],
+        "uy": U[:, 1]
+    })
+import os
+import numpy as np
+import pandas as pd
+import hdbscan
+
+MINPTS_GRID = [10, 15, 20, 25, 30, 50]
+OUT_DIR = "/content/hdbscan_grid_outputs"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+def run_hdbscan_and_save(city_id, X_scaled):
+    X_np = np.asarray(X_scaled, dtype=np.float32)
+
+    rows = []
+    for minPts in MINPTS_GRID:
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=minPts,
+            min_samples=minPts,
+            metric="euclidean",
+            cluster_selection_method="eom",
+            core_dist_n_jobs=-1
+        )
+        labels = clusterer.fit_predict(X_np)
+
+        # noise=0, clusters start at 1
+        cluster = np.where(labels < 0, 0, labels + 1).astype(int)
+
+        # save labels (exact filename expected later)
+        np.save(os.path.join(OUT_DIR, f"{city_id}_hdbscan_minPts{minPts}_cluster.npy"), cluster)
+
+        noise_share = float((cluster == 0).mean())
+        n_clusters = int(len(np.unique(cluster)) - (1 if (cluster == 0).any() else 0))
+
+        rows.append({
+            "city": city_id,
+            "algorithm": "HDBSCAN",
+            "minPts": minPts,
+            "n_clusters": n_clusters,
+            "noise_share": noise_share,
+            "clustered_share": 1.0 - noise_share
+        })
+
+        print(f"[{city_id.upper()}] saved labels | minPts={minPts} | clusters={n_clusters} | noise={noise_share:.3f}")
+
+    return pd.DataFrame(rows)
+
+# --- IMPORTANT: define X_scaled dict (use your existing scaled matrices)
+X_scaled = {
+    "berlin":  X_scaled_berlin,
+    "munich":  X_scaled_munich,
+    "cologne": X_scaled_cologne
+}
+
+# run + save for all cities
+summaries = []
+for city_id in ["berlin", "munich", "cologne"]:
+    summaries.append(run_hdbscan_and_save(city_id, X_scaled[city_id]))
+
+hdbscan_grid_summary = pd.concat(summaries, ignore_index=True)
+display(hdbscan_grid_summary)
+
+print("\nSaved files in:", OUT_DIR)
+print("Example:", os.path.join(OUT_DIR, "berlin_hdbscan_minPts10_cluster.npy"))
+############################################################
+# FINAL — Build Pareto table + Berlin Pareto front (HDBSCAN)
+#
+# Outputs:
+# - pareto_df: all cities, all minPts, (clustered_share, directional_cohesion)
+# - berlin_pareto: non-dominated solutions for Berlin (main result)
+#
+# WHY (explicit):
+# - Cohesion computed only on valid clusters (exclude noise + tiny clusters)
+# - If cohesion undefined (no valid clusters), store NaN (not 0, not None)
+# - Pareto front computed as true non-dominated set (max-max)
+############################################################
+
+import os
+import numpy as np
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ---- Config (keep explicit for examiner)
+MINPTS_GRID = [10, 15, 20, 25, 30, 50]
+MIN_CLUSTER_SIZE_FOR_COHESION = 10
+
+# Where your clusters were saved earlier
+OUT_DIR = "/content/hdbscan_grid_outputs"
+
+def compute_weighted_directional_cohesion(df_city, cluster_labels, min_cluster_size=10):
+    """
+    Weighted mean cosine similarity between each flow direction and its cluster mean direction.
+    Valid clusters only: exclude noise=0 and clusters smaller than min_cluster_size.
+    Returns np.nan if undefined.
+    """
+    # Direction vectors
+    dx = df_city["x_d"].to_numpy(dtype=float) - df_city["x_o"].to_numpy(dtype=float)
+    dy = df_city["y_d"].to_numpy(dtype=float) - df_city["y_o"].to_numpy(dtype=float)
+
+    norms = np.sqrt(dx**2 + dy**2)
+    norms[norms == 0] = 1.0
+    U = np.column_stack([dx / norms, dy / norms])
+
+    tmp = pd.DataFrame({"cluster": cluster_labels, "ux": U[:, 0], "uy": U[:, 1]})
+
+    # Exclude noise
+    tmp = tmp[tmp["cluster"] > 0]
+    if tmp.empty:
+        return np.nan
+
+    # Keep only sufficiently large clusters
+    sizes = tmp.groupby("cluster").size()
+    valid = sizes[sizes >= min_cluster_size].index
+    tmp = tmp[tmp["cluster"].isin(valid)]
+    if tmp.empty:
+        return np.nan
+
+    # Weighted cohesion
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for cl, grp in tmp.groupby("cluster"):
+        mean_dir = grp[["ux", "uy"]].mean().to_numpy().reshape(1, -1)
+        sims = cosine_similarity(grp[["ux", "uy"]].to_numpy(), mean_dir).flatten()
+        weighted_sum += sims.mean() * len(grp)
+        weight_total += len(grp)
+
+    return float(weighted_sum / weight_total) if weight_total > 0 else np.nan
+
+
+def pareto_nondominated_max(df, obj_cols):
+    """
+    True non-dominated set for MAXIMIZATION objectives.
+    i is dominated if exists j with j>=i in all objectives and j>i in at least one.
+    """
+    X = df[obj_cols].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+
+    return df.loc[~dominated].copy()
+
+
+# -------------------------
+# Build Pareto table once
+# -------------------------
+rows = []
+
+for city_id in ["berlin", "munich", "cologne"]:
+    df_city = prepared[city_id]["city_clean"]
+
+    for minPts in MINPTS_GRID:
+        cluster_path = os.path.join(OUT_DIR, f"{city_id}_hdbscan_minPts{minPts}_cluster.npy")
+        if not os.path.exists(cluster_path):
+            raise FileNotFoundError(f"Missing cluster labels: {cluster_path}")
+
+        cluster = np.load(cluster_path)
+
+        # Sanity: alignment check
+        if len(cluster) != len(df_city):
+            raise ValueError(
+                f"[{city_id}] Length mismatch: cluster={len(cluster)} vs city_clean={len(df_city)}"
+            )
+
+        noise_share = float((cluster == 0).mean())
+        clustered_share = 1.0 - noise_share
+
+        cohesion = compute_weighted_directional_cohesion(
+            df_city,
+            cluster,
+            min_cluster_size=MIN_CLUSTER_SIZE_FOR_COHESION
+        )
+
+        rows.append({
+            "city": city_id,
+            "algorithm": "HDBSCAN",
+            "minPts": int(minPts),
+            "clustered_share": float(clustered_share),
+            "directional_cohesion": cohesion
+        })
+
+pareto_df = pd.DataFrame(rows)
+
+print("=== Pareto table (all cities) ===")
+display(pareto_df.sort_values(["city", "minPts"]))
+
+# -------------------------
+# Final Berlin Pareto front
+# -------------------------
+berlin_valid = pareto_df[
+    (pareto_df["city"] == "berlin") &
+    (pareto_df["directional_cohesion"].notna())
+].copy()
+
+print("Berlin points with defined cohesion:", len(berlin_valid))
+
+if berlin_valid.empty:
+    print("No Berlin Pareto front: directional_cohesion undefined for all minPts.")
+    berlin_pareto = berlin_valid
+else:
+    berlin_pareto = pareto_nondominated_max(
+        berlin_valid,
+        obj_cols=["clustered_share", "directional_cohesion"]
+    )
+
+    print("=== FINAL Berlin Pareto front ===")
+    display(berlin_pareto.sort_values("minPts"))
+def compute_weighted_directional_cohesion(df_city, cluster_labels):
+    dx = df_city["x_d"].to_numpy() - df_city["x_o"].to_numpy()
+    dy = df_city["y_d"].to_numpy() - df_city["y_o"].to_numpy()
+
+    norms = np.sqrt(dx**2 + dy**2)
+    norms[norms == 0] = 1.0
+    U = np.column_stack([dx / norms, dy / norms])
+
+    df_tmp = pd.DataFrame({
+        "cluster": cluster_labels,
+        "ux": U[:, 0],
+        "uy": U[:, 1]
+    })
+
+    # Exclude noise
+    df_tmp = df_tmp[df_tmp["cluster"] > 0]
+    if df_tmp.empty:
+        return np.nan
+
+    # Cluster sizes
+    sizes = df_tmp.groupby("cluster").size()
+
+    # Keep only stable clusters
+    valid_clusters = sizes[sizes >= MIN_CLUSTER_SIZE_FOR_COHESION].index
+    df_tmp = df_tmp[df_tmp["cluster"].isin(valid_clusters)]
+    if df_tmp.empty:
+        return np.nan
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for cl, grp in df_tmp.groupby("cluster"):
+        mean_dir = grp[["ux", "uy"]].mean().to_numpy().reshape(1, -1)
+        sims = cosine_similarity(
+            grp[["ux", "uy"]].to_numpy(), mean_dir
+        ).flatten()
+        weighted_sum +_
+def compute_weighted_directional_cohesion(df_city, cluster_labels):
+    dx = df_city["x_d"].to_numpy() - df_city["x_o"].to_numpy()
+    dy = df_city["y_d"].to_numpy() - df_city["y_o"].to_numpy()
+
+    norms = np.sqrt(dx**2 + dy**2)
+    norms[norms == 0] = 1.0
+    U = np.column_stack([dx / norms, dy / norms])
+
+    df_tmp = pd.DataFrame({
+        "cluster": cluster_labels,
+        "ux": U[:, 0],
+        "uy": U[:, 1]
+    })
+
+    # Exclude noise
+    df_tmp = df_tmp[df_tmp["cluster"] > 0]
+    if df_tmp.empty:
+        return np.nan
+
+    # Cluster sizes
+    sizes = df_tmp.groupby("cluster").size()
+
+    # Keep only stable clusters
+    valid_clusters = sizes[sizes >= MIN_CLUSTER_SIZE_FOR_COHESION].index
+    df_tmp = df_tmp[df_tmp["cluster"].isin(valid_clusters)]
+    if df_tmp.empty:
+        return np.nan
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for cl, grp in df_tmp.groupby("cluster"):
+        mean_dir = grp[["ux", "uy"]].mean().to_numpy().reshape(1, -1)
+        sims = cosine_similarity(
+            grp[["ux", "uy"]].to_numpy(), mean_dir
+        ).flatten()
+        weighted_sum +_
+############################################################
+# Pareto front helper (FINAL)
+#
+# Maximizes both objectives.
+# A solution is dominated if another solution is
+# >= in all objectives and > in at least one.
+############################################################
+
+import numpy as np
+import pandas as pd
+
+def pareto_front(df, obj_x, obj_y):
+    """
+    Compute Pareto front for maximization of obj_x and obj_y.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+    obj_x, obj_y : str
+        Column names of objectives to maximize
+
+    Returns
+    -------
+    pd.DataFrame
+        Non-dominated solutions
+    """
+    X = df[[obj_x, obj_y]].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+
+    return df.loc[~dominated].copy()
+berlin_df = pareto_df[
+    (pareto_df.city == "berlin") &
+    (~pareto_df.directional_cohesion.isna())
+]
+
+berlin_pareto = pareto_front(
+    berlin_df,
+    obj_x="clustered_share",
+    obj_y="directional_cohesion"
+)
+
+display(berlin_pareto)
+print("type:", type(berlin_pareto))
+print("shape:", getattr(berlin_pareto, "shape", None))
+print("head:")
+display(berlin_pareto.head() if hasattr(berlin_pareto, "head") else berlin_pareto)
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# --- True non-dominated set for MAXIMIZATION (same logic you used)
+def pareto_nondominated_max(df, obj_cols=("clustered_share","directional_cohesion")):
+    X = df[list(obj_cols)].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+
+    return df.loc[~dominated].copy()
+
+def plot_city_pareto(city_id: str, pareto_df: pd.DataFrame):
+    df = pareto_df[pareto_df["city"] == city_id].copy()
+
+    # drop undefined cohesion (if any)
+    df = df[df["directional_cohesion"].notna()].copy()
+
+    if df.empty:
+        print(f"[{city_id.upper()}] No points to plot (directional_cohesion undefined).")
+        return
+
+    front = pareto_nondominated_max(df)
+
+    plt.figure(figsize=(6, 4))
+
+    # All points
+    plt.scatter(df["clustered_share"], df["directional_cohesion"])
+
+    # Pareto front highlighted (same default color cycle but different marker)
+    plt.scatter(front["clustered_share"], front["directional_cohesion"], marker="D")
+
+    # Label each point with minPts
+    for _, r in df.iterrows():
+        plt.annotate(
+            str(int(r["minPts"])),
+            (r["clustered_share"], r["directional_cohesion"]),
+            fontsize=8
+        )
+
+    plt.xlabel("clustered_share (maximize)")
+    plt.ylabel("directional_cohesion (maximize)")
+    plt.title(f"{city_id.upper()} — Pareto points (diamond = Pareto front)")
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+# ---- Plot each city separately
+for city in ["berlin", "munich", "cologne"]:
+    plot_city_pareto(city, pareto_df)
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# --- True non-dominated set for MAXIMIZATION (same logic you used)
+def pareto_nondominated_max(df, obj_cols=("clustered_share","directional_cohesion")):
+    X = df[list(obj_cols)].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+
+    return df.loc[~dominated].copy()
+
+def plot_city_pareto(city_id: str, pareto_df: pd.DataFrame):
+    df = pareto_df[pareto_df["city"] == city_id].copy()
+
+    # drop undefined cohesion (if any)
+    df = df[df["directional_cohesion"].notna()].copy()
+
+    if df.empty:
+        print(f"[{city_id.upper()}] No points to plot (directional_cohesion undefined).")
+        return
+
+    front = pareto_nondominated_max(df)
+
+    plt.figure(figsize=(6, 4))
+
+    # All points
+    plt.scatter(df["clustered_share"], df["directional_cohesion"])
+
+    # Pareto front highlighted (same default color cycle but different marker)
+    plt.scatter(front["clustered_share"], front["directional_cohesion"], marker="D")
+
+    # Label each point with minPts
+    for _, r in df.iterrows():
+        plt.annotate(
+            str(int(r["minPts"])),
+            (r["clustered_share"], r["directional_cohesion"]),
+            fontsize=8
+        )
+
+    plt.xlabel("clustered_share (maximize)")
+    plt.ylabel("directional_cohesion (maximize)")
+    plt.title(f"{city_id.upper()} — Pareto points (diamond = Pareto front)")
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+# ---- Plot each city separately
+for city in ["berlin", "munich", "cologne"]:
+    plot_city_pareto(city, pareto_df)
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def pareto_nondominated_max(df, obj_cols=("clustered_share","directional_cohesion")):
+    X = df[list(obj_cols)].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+    return df.loc[~dominated].copy()
+
+def plot_city_pareto(city_id: str, pareto_df: pd.DataFrame):
+    df = pareto_df[pareto_df["city"] == city_id].copy()
+    df = df[df["directional_cohesion"].notna()].copy()
+
+    if df.empty:
+        print(f"[{city_id.upper()}] No points to plot.")
+        return
+
+    front = pareto_nondominated_max(df)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    ax.scatter(df["clustered_share"], df["directional_cohesion"], alpha=0.7)
+    ax.scatter(front["clustered_share"], front["directional_cohesion"], marker="D", zorder=3)
+
+    for _, r in df.iterrows():
+        ax.annotate(str(int(r["minPts"])),
+                    (r["clustered_share"], r["directional_cohesion"]),
+                    fontsize=8)
+
+    ax.set_xlabel("clustered_share (maximize)")
+    ax.set_ylabel("directional_cohesion (maximize)")
+    ax.set_title(f"{city_id.upper()} — Pareto points (diamond = Pareto front)")
+    ax.grid(True, alpha=0.3)
+
+    out_file = os.path.join(OUT, f"hdbscan_pareto_{city_id}.pdf")
+    fig.savefig(out_file, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"[SAVED?] {out_file} ->", os.path.exists(out_file), "| size:", os.path.getsize(out_file) if os.path.exists(out_file) else None)
+
+for city in ["berlin", "munich", "cologne"]:
+    plot_city_pareto(city, pareto_df)
+
+print("Final OUT contents:", os.listdir(OUT))
+import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_diagonal_tradeoff(city_id, pareto_df):
+    df = pareto_df[pareto_df["city"] == city_id].copy()
+    df = df[df["directional_cohesion"].notna()]
+
+    if df.empty:
+        print(f"[{city_id.upper()}] No data.")
+        return
+
+    x = df["clustered_share"].values
+    y = df["directional_cohesion"].values
+
+    plt.figure(figsize=(6, 4))
+    plt.scatter(x, y, alpha=0.7)
+
+    # diagonal reference
+    lims = [
+        min(x.min(), y.min()),
+        max(x.max(), y.max())
+    ]
+    plt.plot(lims, lims, "--", color="gray", alpha=0.6)
+
+    plt.xlabel("Clustered coverage")
+    plt.ylabel("Directional cohesion")
+    plt.title(f"{city_id.upper()} — Coverage vs Cohesion (diagonal reference)")
+    plt.grid(True, alpha=0.3)
+    plt.show()
+import os
+import matplotlib.pyplot as plt
+
+OUT = "/content/drive/MyDrive/colab_results"
+os.makedirs(OUT, exist_ok=True)
+
+def plot_objective_diagnostics_separate(pareto_df, city_id):
+    df = pareto_df[pareto_df["city"] == city_id].sort_values("minPts")
+
+    # -------------------------
+    # Plot 1 — Clustered share
+    # -------------------------
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(
+        df["minPts"],
+        df["clustered_share"],
+        marker="o"
+    )
+    ax.set_xlabel("minPts")
+    ax.set_ylabel("Clustered share")
+    ax.set_ylim(0, 1.05)
+    ax.set_title(f"{city_id.upper()} — Clustered share vs minPts")
+    ax.grid(True, alpha=0.3)
+
+    filename_1 = os.path.join(
+        OUT, f"{city_id}_clustered_share_vs_minPts.pdf"
+    )
+    fig.savefig(filename_1, format="pdf", bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    # -------------------------
+    # Plot 2 — Directional cohesion
+    # -------------------------
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(
+        df["minPts"],
+        df["directional_cohesion"],
+        marker="s"
+    )
+    ax.set_xlabel("minPts")
+    ax.set_ylabel("Directional cohesion")
+    ax.set_title(f"{city_id.upper()} — Directional cohesion vs minPts")
+    ax.grid(True, alpha=0.3)
+
+    filename_2 = os.path.join(
+        OUT, f"{city_id}_directional_cohesion_vs_minPts.pdf"
+    )
+    fig.savefig(filename_2, format="pdf", bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+for city in ["berlin", "munich", "cologne"]:
+    plot_objective_diagnostics_separate(pareto_df, city)
+!pip -q install pygmo
+import numpy as np
+import pandas as pd
+
+def pareto_nondominated_max(df, obj_cols=("clustered_share", "directional_cohesion")):
+    X = df[list(obj_cols)].to_numpy()
+    n = X.shape[0]
+    dominated = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        if dominated[i]:
+            continue
+        ge = (X >= X[i]).all(axis=1)
+        gt = (X >  X[i]).any(axis=1)
+        dom_i = ge & gt
+        dom_i[i] = False
+        if dom_i.any():
+            dominated[i] = True
+
+    return df.loc[~dominated].copy()
+def hypervolume_2d_max(points, ref=(0.0, 0.0)):
+    """
+    Exact hypervolume for 2D maximization.
+    points: Nx2 array of NON-DOMINATED points
+    ref: reference point (worse than all points)
+    """
+    P = np.asarray(points, dtype=float)
+
+    # sort by first objective descending
+    P = P[np.argsort(-P[:, 0])]
+
+    hv = 0.0
+    prev_y = ref[1]
+
+    for x, y in P:
+        width  = max(0.0, x - ref[0])
+        height = max(0.0, y - prev_y)
+        hv += width * height
+        prev_y = max(prev_y, y)
+
+    return float(hv)
+def hypervolume_shape_2d(points):
+    """
+    Shape-based HV: normalize each objective to [0,1] first.
+    """
+    P = np.asarray(points, dtype=float)
+
+    mins = P.min(axis=0)
+    maxs = P.max(axis=0)
+    denom = np.where((maxs - mins) == 0, 1.0, (maxs - mins))
+    Pn = (P - mins) / denom
+
+    return hypervolume_2d_max(Pn, ref=(0.0, 0.0))
+def compute_city_hv(pareto_df, city_id):
+    df = pareto_df[
+        (pareto_df.city == city_id) &
+        (pareto_df.directional_cohesion.notna())
+    ].copy()
+
+    if df.empty:
+        return {
+            "city": city_id,
+            "hv_global": np.nan,
+            "hv_shape": np.nan,
+            "n_points": 0
+        }
+
+    df_nd = pareto_nondominated_max(
+        df,
+        ("clustered_share", "directional_cohesion")
+    )
+
+    pts = df_nd[["clustered_share", "directional_cohesion"]].to_numpy()
+
+    return {
+        "city": city_id,
+        "hv_global": hypervolume_2d_max(pts, ref=(0.0, 0.0)),
+        "hv_shape": hypervolume_shape_2d(pts),
+        "n_points": len(pts)
+    }
+hv_df = pd.DataFrame([
+    compute_city_hv(pareto_df, city)
+    for city in ["berlin", "munich", "cologne"]
+])
+
+display(hv_df)
+!pip -q install deap hdbscan
+import random
+import numpy as np
+import pandas as pd
+import hdbscan
+
+from deap import base, creator, tools, algorithms
+from sklearn.metrics.pairwise import cosine_similarity
+
+# -----------------------------
+# Objective: directional cohesion
+# -----------------------------
+def compute_weighted_directional_cohesion(df_city, cluster_labels, min_cluster_size_for_cohesion=10):
+    dx = df_city["x_d"].to_numpy(dtype=float) - df_city["x_o"].to_numpy(dtype=float)
+    dy = df_city["y_d"].to_numpy(dtype=float) - df_city["y_o"].to_numpy(dtype=float)
+
+    norms = np.sqrt(dx**2 + dy**2)
+    norms[norms == 0] = 1.0
+    U = np.column_stack([dx / norms, dy / norms])
+
+    tmp = pd.DataFrame({"cluster": cluster_labels, "ux": U[:, 0], "uy": U[:, 1]})
+    tmp = tmp[tmp["cluster"] > 0]
+    if tmp.empty:
+        return np.nan
+
+    sizes = tmp.groupby("cluster").size()
+    valid = sizes[sizes >= min_cluster_size_for_cohesion].index
+    tmp = tmp[tmp["cluster"].isin(valid)]
+    if tmp.empty:
+        return np.nan
+
+    weighted_sum, weight_total = 0.0, 0.0
+    for _, grp in tmp.groupby("cluster"):
+        mean_dir = grp[["ux", "uy"]].mean().to_numpy().reshape(1, -1)
+        sims = cosine_similarity(grp[["ux", "uy"]].to_numpy(), mean_dir).flatten()
+        weighted_sum += sims.mean() * len(grp)
+        weight_total += len(grp)
+
+    return float(weighted_sum / weight_total) if weight_total > 0 else np.nan
+
+
+# -----------------------------
+# NSGA-II optimization (HDBSCAN)
+# -----------------------------
+def run_nsga2_hdbscan(city_id, X_scaled, df_city,
+                      pop_size=40, ngen=25, seed=42,
+                      min_mcs=10, max_mcs=80,
+                      min_ms=5,
+                      min_cluster_size_for_cohesion=10):
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    X_np = np.asarray(X_scaled, dtype=np.float32)
+
+    # Fitness: maximize both objectives
+    if "FitnessMax2" not in creator.__dict__:
+        creator.create("FitnessMax2", base.Fitness, weights=(1.0, 1.0))
+    if "Individual2" not in creator.__dict__:
+        creator.create("Individual2", list, fitness=creator.FitnessMax2)
+
+    toolbox = base.Toolbox()
+
+    # Individual = [min_cluster_size, min_samples]
+    def init_individual():
+        mcs = random.randint(min_mcs, max_mcs)
+        ms  = random.randint(min_ms, mcs)  # must be <= mcs
+        return creator.Individual2([mcs, ms])
+
+    toolbox.register("individual", init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    def evaluate(ind):
+        mcs, ms = int(ind[0]), int(ind[1])
+
+        # constraint safety
+        mcs = max(min_mcs, min(max_mcs, mcs))
+        ms  = max(min_ms, min(mcs, ms))
+
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=mcs,
+            min_samples=ms,
+            metric="euclidean",
+            cluster_selection_method="eom",
+            core_dist_n_jobs=-1
+        )
+        labels = clusterer.fit_predict(X_np)
+        cluster = np.where(labels < 0, 0, labels + 1).astype(int)
+
+        clustered_share = 1.0 - float((cluster == 0).mean())
+        cohesion = compute_weighted_directional_cohesion(
+            df_city, cluster, min_cluster_size_for_cohesion=min_cluster_size_for_cohesion
+        )
+
+        # If cohesion undefined, penalize (WHY: NSGA needs numeric fitness)
+        if np.isnan(cohesion):
+            cohesion = 0.0
+
+        return clustered_share, cohesion
+
+    toolbox.register("evaluate", evaluate)
+
+    # Variation operators
+    toolbox.register("mate", tools.cxUniform, indpb=0.5)
+
+    def mut(ind, indpb=0.25):
+        # mutate mcs
+        if random.random() < indpb:
+            ind[0] = int(ind[0] + random.randint(-10, 10))
+        # mutate ms
+        if random.random() < indpb:
+            ind[1] = int(ind[1] + random.randint(-10, 10))
+
+        # repair constraints
+        ind[0] = max(min_mcs, min(max_mcs, int(ind[0])))
+        ind[1] = max(min_ms, min(int(ind[0]), int(ind[1])))
+        return (ind,)
+
+    toolbox.register("mutate", mut)
+    toolbox.register("select", tools.selNSGA2)
+
+    # Run NSGA-II
+    pop = toolbox.population(n=pop_size)
+
+    # Evaluate initial pop
+    invalid = [ind for ind in pop if not ind.fitness.valid]
+    fits = list(map(toolbox.evaluate, invalid))
+    for ind, fit in zip(invalid, fits):
+        ind.fitness.values = fit
+
+    # Assign crowding distance etc.
+    pop = toolbox.select(pop, len(pop))
+
+    for gen in range(ngen):
+        offspring = tools.selTournamentDCD(pop, len(pop))
+        offspring = [toolbox.clone(ind) for ind in offspring]
+
+        # variation
+        for c1, c2 in zip(offspring[::2], offspring[1::2]):
+            if random.random() < 0.9:
+                toolbox.mate(c1, c2)
+                del c1.fitness.values, c2.fitness.values
+
+        for mut_ind in offspring:
+            if random.random() < 0.3:
+                toolbox.mutate(mut_ind)
+                del mut_ind.fitness.values
+
+        # evaluate new
+        invalid = [ind for ind in offspring if not ind.fitness.valid]
+        fits = list(map(toolbox.evaluate, invalid))
+        for ind, fit in zip(invalid, fits):
+            ind.fitness.values = fit
+
+        # NSGA-II replacement
+        pop = toolbox.select(pop + offspring, pop_size)
+
+    # Extract final Pareto front
+    front = tools.sortNondominated(pop, k=len(pop), first_front_only=True)[0]
+
+    out = pd.DataFrame([{
+        "city": city_id,
+        "min_cluster_size": int(ind[0]),
+        "min_samples": int(ind[1]),
+        "clustered_share": float(ind.fitness.values[0]),
+        "directional_cohesion": float(ind.fitness.values[1])
+    } for ind in front])
+
+    return out.sort_values(["clustered_share", "directional_cohesion"], ascending=False)
+import numpy as np
+
+# --- Subsample fraction (robustness check, not main analysis)
+SUBSAMPLE_FRAC = 0.3   # 30% is plenty
+
+# Full data (already prepared earlier)
+X_full  = X_scaled_berlin
+df_full = prepared["berlin"]["city_clean"]
+
+# Reproducibility
+rng = np.random.default_rng(42)
+
+idx = rng.choice(
+    len(X_full),
+    size=int(SUBSAMPLE_FRAC * len(X_full)),
+    replace=False
+)
+
+X_nsga  = X_full[idx]
+df_nsga = df_full.iloc[idx].reset_index(drop=True)
+
+print("NSGA-II subsample size:", len(X_nsga))
+nsga_berlin = run_nsga2_hdbscan(
+    city_id="berlin",
+    X_scaled=X_nsga,
+    df_city=df_nsga,
+    pop_size=16,
+    ngen=8,
+    seed=42,
+    min_mcs=10,
+    max_mcs=50,
+    min_ms=10
+)
+
+display(nsga_berlin)
+print("NSGA-II Pareto points (Berlin):", len(nsga_berlin))
+nsga_berlin_unique = nsga_berlin.drop_duplicates(
+    subset=["clustered_share", "directional_cohesion"]
+).reset_index(drop=True)
+
+display(nsga_berlin_unique)
+print("Unique NSGA-II Pareto points:", len(nsga_berlin_unique))
+import numpy as np
+import pandas as pd
+import hdbscan
+
+def compute_dbcv(
+    X_scaled,
+    cluster_labels,
+    max_points=50000,
+    on_clustered_only=True,
+    seed=42
+):
+    """
+    Compute DBCV (Density-Based Clustering Validation).
+
+    Parameters
+    ----------
+    X_scaled : np.ndarray (n x d)
+        Feature matrix (scaled)
+    cluster_labels : array-like (n,)
+        Your labels convention: noise=0, clusters >=1
+    max_points : int
+        Subsample cap for speed. Set None to disable (not recommended for Berlin full size).
+    on_clustered_only : bool
+        If True, compute DBCV only on non-noise points.
+    seed : int
+        For reproducible subsampling.
+
+    Returns
+    -------
+    float
+        DBCV score (higher is better; can be negative).
+    """
+    X = np.asarray(X_scaled, dtype=np.float32)
+    lab = np.asarray(cluster_labels, dtype=int)
+
+    # Convert to hdbscan convention: noise = -1
+    lab = lab.copy()
+    lab[lab == 0] = -1
+
+    # Optionally restrict to clustered points only (recommended)
+    if on_clustered_only:
+        mask = (lab != -1)
+        X = X[mask]
+        lab = lab[mask]
+
+    # If nothing clustered or only one cluster, DBCV is undefined / uninformative
+    if len(lab) < 20:
+        return np.nan
+    if len(np.unique(lab)) < 2:
+        return np.nan
+
+    # Subsample for feasibility (DBCV can be heavy)
+    if max_points is not None and len(lab) > max_points:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(lab), size=max_points, replace=False)
+        X = X[idx]
+        lab = lab[idx]
+
+    # Compute DBCV (hdbscan.validity_index implements density-based validity)
+    return float(hdbscan.validity.validity_index(X, lab, metric="euclidean"))
+import numpy as np
+import hdbscan
+
+def compute_dbcv(
+    X_scaled,
+    cluster_labels,
+    max_points=50000,
+    on_clustered_only=True,
+    seed=42
+):
+    """
+    Compute DBCV using hdbscan.validity_index.
+    Fix: validity_index requires float64 input.
+    """
+
+    # --- IMPORTANT: float64 for validity_index
+    X = np.asarray(X_scaled, dtype=np.float64)
+
+    lab = np.asarray(cluster_labels, dtype=int).copy()
+    lab[lab == 0] = -1  # convert noise to -1
+
+    # Optionally restrict to clustered points only (recommended)
+    if on_clustered_only:
+        mask = (lab != -1)
+        X = X[mask]
+        lab = lab[mask]
+
+    # If too small / trivial clustering, return NaN
+    if len(lab) < 20:
+        return np.nan
+    if len(np.unique(lab)) < 2:
+        return np.nan
+
+    # Subsample for feasibility
+    if max_points is not None and len(lab) > max_points:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(lab), size=max_points, replace=False)
+        X = X[idx]
+        lab = lab[idx]
+
+    return float(hdbscan.validity.validity_index(X, lab, metric="euclidean"))
+def pareto_front_max(df, obj_x, obj_y):
+    """
+    Return non-dominated points for a max–max problem.
+    """
+    X = df[[obj_x, obj_y]].to_numpy()
+    keep = np.ones(len(X), dtype=bool)
+
+    for i in range(len(X)):
+        for j in range(len(X)):
+            if i != j:
+                if (X[j, 0] >= X[i, 0] and X[j, 1] >= X[i, 1]) and \
+                   (X[j, 0] >  X[i, 0] or  X[j, 1] >  X[i, 1]):
+                    keep[i] = False
+                    break
+    return df.loc[keep].reset_index(drop=True)
+import pandas as pd
+import numpy as np
+nsga_berlin = pd.DataFrame({
+    "min_cluster_size": [10, 18, 15, 16, 18, 15, 18],
+    "min_samples":      [10, 17, 10, 16, 15, 15, 11],
+    "clustered_share":  [0.992273, 0.989972, 0.958893, 0.874895, 0.867014, 0.866401, 0.836088],
+    "directional_cohesion": [0.006407, 0.006504, 0.007331, 0.011943, 0.012130, 0.012193, 0.012876]
+})
+def pareto_front_max(df, obj_x, obj_y):
+    X = df[[obj_x, obj_y]].to_numpy()
+    keep = np.ones(len(X), dtype=bool)
+
+    for i in range(len(X)):
+        for j in range(len(X)):
+            if i != j:
+                if (X[j, 0] >= X[i, 0] and X[j, 1] >= X[i, 1]) and \
+                   (X[j, 0] >  X[i, 0] or  X[j, 1] >  X[i, 1]):
+                    keep[i] = False
+                    break
+    return df.loc[keep].reset_index(drop=True)
+nsga_berlin_pareto = pareto_front_max(
+    nsga_berlin,
+    obj_x="clustered_share",
+    obj_y="directional_cohesion"
+)
+
+display(nsga_berlin_pareto)
+[k for k in globals().keys() if "pareto" in k.lower()]
+# NSGA-II Pareto front (Berlin)
+nsga_berlin_pareto = pareto_nondominated_max(
+    nsga_berlin_unique,
+    obj_cols=("clustered_share", "directional_cohesion")
+)
+
+display(nsga_berlin_pareto)
+print("NSGA-II Pareto points (Berlin):", len(nsga_berlin_pareto))
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(7, 5))
+
+# All evaluated grid points (faint background)
+plt.scatter(
+    pareto_df[pareto_df.city == "berlin"]["clustered_share"],
+    pareto_df[pareto_df.city == "berlin"]["directional_cohesion"],
+    color="lightgray",
+    s=30,
+    label="All HDBSCAN grid runs"
+)
+
+# Grid-based Pareto front
+plt.scatter(
+    berlin_pareto["clustered_share"],
+    berlin_pareto["directional_cohesion"],
+    color="tab:blue",
+    s=80,
+    marker="o",
+    label="Grid-based Pareto front"
+)
+
+# NSGA-II Pareto front
+plt.scatter(
+    nsga_berlin_pareto["clustered_share"],
+    nsga_berlin_pareto["directional_cohesion"],
+    color="tab:red",
+    s=90,
+    marker="D",
+    label="NSGA-II Pareto front"
+)
+
+plt.xlabel("Clustered share")
+plt.ylabel("Directional cohesion")
+plt.title("Berlin: Grid vs NSGA-II Pareto fronts")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+import numpy as np
+import pandas as pd
+
+CITY_IDS = ["berlin", "munich", "cologne"]
+
+X_scaled = {
+    "berlin":  X_scaled_berlin,
+    "munich":  X_scaled_munich,
+    "cologne": X_scaled_cologne
+}
+
+city_clean = {
+    "berlin":  prepared["berlin"]["city_clean"],
+    "munich":  prepared["munich"]["city_clean"],
+    "cologne": prepared["cologne"]["city_clean"]
+}
+import numpy as np
+import pandas as pd
+
+CITY_IDS = ["berlin", "munich", "cologne"]
+
+X_scaled = {
+    "berlin":  X_scaled_berlin,
+    "munich":  X_scaled_munich,
+    "cologne": X_scaled_cologne
+}
+
+city_clean = {
+    "berlin":  prepared["berlin"]["city_clean"],
+    "munich":  prepared["munich"]["city_clean"],
+    "cologne": prepared["cologne"]["city_clean"]
+}
+hv_df  # columns: city, hv_global, hv_shape (and maybe n_points)
+import matplotlib.pyplot as plt
+
+# Ensure consistent order
+order = ["berlin", "munich", "cologne"]
+hv_plot = hv_df.copy()
+hv_plot["city"] = pd.Categorical(hv_plot["city"], categories=order, ordered=True)
+hv_plot = hv_plot.sort_values("city")
+
+# ---- Plot 1: Global HV
+plt.figure(figsize=(6,4))
+plt.bar(hv_plot["city"], hv_plot["hv_global"])
+plt.xlabel("City")
+plt.ylabel("Hypervolume (global)")
+plt.title("Global hypervolume by city")
+plt.grid(True, axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ---- Plot 2: Shape HV
+plt.figure(figsize=(6,4))
+plt.bar(hv_plot["city"], hv_plot["hv_shape"])
+plt.xlabel("City")
+plt.ylabel("Hypervolume (shape-normalized)")
+plt.title("Shape-normalized hypervolume by city")
+plt.grid(True, axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
