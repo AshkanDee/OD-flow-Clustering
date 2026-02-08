@@ -1,0 +1,105 @@
+i upgraded this code:
+############################################################
+# Step 9 — Cluster summary (size + means)
+############################################################
+
+min_cluster_size <- 10  # small clusters are unstable patterns
+
+cluster_summaries <- list()
+
+for (city_id in names(prepared)) {
+
+  city_dt <- prepared[[city_id]]$city_clean
+
+  cluster_summary <- city_dt %>%
+    filter(cluster != 0) %>%                 # exclude noise
+    group_by(cluster) %>%
+    summarise(
+      size = n(),
+      mean_x_o = mean(x_o),
+      mean_y_o = mean(y_o),
+      mean_dx  = mean(dx),
+      mean_dy  = mean(dy),
+      mean_len = mean(len, na.rm = TRUE),
+      mean_duration = mean(duration, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    filter(size >= min_cluster_size) %>%     # APPLY FILTER HERE
+    arrange(desc(size))
+
+  cluster_summaries[[city_id]] <- cluster_summary
+
+  cat("\n---", toupper(city_id), "---\n")
+  print(head(cluster_summary, 15))
+}
+
+I removed this code:
+############################################################
+# Step 11 — Exclude dominant cluster (if needed)
+############################################################
+
+moo_clusters <- list()
+
+for (city_id in names(cluster_summaries)) {
+
+  cs <- cluster_summaries[[city_id]]
+
+  # Identify dominant cluster by size
+  dominant_cluster <- cs$cluster[which.max(cs$size)]
+
+  cs_moo <- cs %>%
+    dplyr::filter(cluster != dominant_cluster)
+
+  moo_clusters[[city_id]] <- cs_moo
+
+  cat(
+    city_id,
+    "| dominant cluster:", dominant_cluster,
+    "| clusters kept:", nrow(cs_moo), "\n"
+  )
+}
+I excluded:
+############################################################
+# Step 18 — Objective function wrapper (per city)
+############################################################
+
+objfun_list <- list()
+
+for (city_id in names(moo_clusters)) {
+
+  df <- moo_clusters[[city_id]]
+  u  <- direction_vectors[[city_id]]
+
+  objfun_list[[city_id]] <- function(x_cont) {
+    x_bin <- as.integer(x_cont > 0.5)
+    eval_solution(x_bin, df, u)
+  }
+}
+I excluded:
+############################################################
+# Step 19 — NSGA-II optimization (per city)
+############################################################
+
+set.seed(1)
+
+nsga_results <- list()
+
+for (city_id in names(objfun_list)) {
+
+  K <- nrow(moo_clusters[[city_id]])
+
+  res <- nsga2(
+    fn = objfun_list[[city_id]],
+    idim = K,
+    odim = 2,
+    lower.bounds = rep(0, K),
+    upper.bounds = rep(1, K),
+    popsize = 200,
+    generations = 200
+  )
+
+  nsga_results[[city_id]] <- res
+
+  cat("NSGA-II finished for:", toupper(city_id), "\n")
+}
+
