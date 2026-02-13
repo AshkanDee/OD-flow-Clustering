@@ -879,6 +879,8 @@ eval_dbscan_params <- function(eps, minPts, X_scaled, city_dt) {
 }
 make_objfun_city_cached <- function(city_id, prepared,
                                     eps_min, eps_max, minPts_min, minPts_max,
+                                    eps_step = 0.05,
+                                    minPts_allowed = c(20L, 30L, 50L),
                                     eps_digits = 3) {
 
   X_scaled <- prepared[[city_id]]$X_scaled
@@ -895,10 +897,12 @@ make_objfun_city_cached <- function(city_id, prepared,
 
   function(x) {
     eps_raw <- max(eps_min, min(x[1], eps_max))
-    eps <- round(eps_raw, eps_digits)  # improves cache hit rate
+    eps <- round(eps_min + round((eps_raw - eps_min) / eps_step) * eps_step, eps_digits)
+    eps <- max(eps_min, min(eps, eps_max))
 
-    minPts <- as.integer(round(x[2]))
-    minPts <- max(minPts_min, min(minPts, minPts_max))
+    minPts_raw <- as.integer(round(x[2]))
+    minPts_raw <- max(minPts_min, min(minPts_raw, minPts_max))
+    minPts <- minPts_allowed[which.min(abs(minPts_allowed - minPts_raw))]
 
     key <- paste0(sprintf(paste0("%.", eps_digits, "f"), eps), "_", minPts)
 
@@ -937,10 +941,13 @@ data_for_opt <- prepared_sub
 
 set.seed(1)
 
-eps_min <- 0.20
+eps_min <- 0.30
 eps_max <- 0.60
 minPts_min <- 20
 minPts_max <- 50
+# align with earlier grid for fair comparison
+eps_step <- 0.05
+minPts_allowed <- c(20L, 30L, 50L)
 
 popsize <- 40
 generations <- 25
@@ -955,7 +962,9 @@ for (city_id in names(data_for_opt)) {
 
   objfun_params[[city_id]] <- make_objfun_city_cached(
     city_id, data_for_opt,
-    eps_min, eps_max, minPts_min, minPts_max
+    eps_min, eps_max, minPts_min, minPts_max,
+    eps_step = eps_step,
+    minPts_allowed = minPts_allowed
   )
 
   res <- mco::nsga2(
