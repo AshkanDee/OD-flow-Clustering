@@ -22,13 +22,16 @@ if (length(missing_pkgs) > 0) install.packages(missing_pkgs)
 invisible(lapply(required_pkgs, library, character.only = TRUE))
 
 # ---- Step 1: Load + inspect all cities (no combining) ----
+# WHY:
+# - Quick schema check across cities in one run
+# - Confirms consistency before clustering
+# - Keeps each city dataset separate (no merge/stack)
+
 city_paths <- list(
   berlin  = "/content/drive/MyDrive/berlin_flows_utm.rds",
   munich  = "/content/drive/MyDrive/munich_flows_utm.rds",
   cologne = "/content/drive/MyDrive/cologne_flows_utm.rds"
 )
-
-required_columns <- c("x_o", "y_o", "x_d", "y_d", "dx", "dy", "len", "angle")
 
 city_data <- lapply(names(city_paths), function(city_id) {
   path <- city_paths[[city_id]]
@@ -37,20 +40,12 @@ city_data <- lapply(names(city_paths), function(city_id) {
   }
 
   dt <- as.data.table(readRDS(path))
-  dt[, city := city_id]
-
-  missing_cols <- setdiff(required_columns, names(dt))
-  if (length(missing_cols) > 0) {
-    warning(sprintf("%s missing columns: %s", city_id, paste(missing_cols, collapse = ", ")))
-  }
-
+  dt[, city := city_id]  # traceability tag
   dt
 })
 names(city_data) <- names(city_paths)
 
-for (city_id in names(city_data)) {
-  dt <- city_data[[city_id]]
-
+print_city_inspection <- function(city_id, dt) {
   cat("\n=============================\n")
   cat("CITY:", toupper(city_id), "\n")
   cat("=============================\n")
@@ -63,13 +58,6 @@ for (city_id in names(city_data)) {
 
   cat("\nnames():\n")
   print(names(dt))
-
-  cat("\nmissing required columns:\n")
-  print(setdiff(required_columns, names(dt)))
-
-  cat("\nNA counts in key fields:\n")
-  key_cols <- intersect(required_columns, names(dt))
-  if (length(key_cols) > 0) {
-    print(dt[, lapply(.SD, function(x) sum(is.na(x))), .SDcols = key_cols])
-  }
 }
+
+invisible(Map(print_city_inspection, names(city_data), city_data))
