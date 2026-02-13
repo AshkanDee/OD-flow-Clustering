@@ -944,8 +944,8 @@ set.seed(1)
 # Expanded bounds and finer grid for richer Pareto fronts
 eps_min <- 0.20
 eps_max <- 0.60
-minPts_min <- 8
-minPts_max <- 50
+minPts_max <- 80
+minPts_allowed <- c(12L, 15L, 20L, 25L, 30L, 40L, 50L, 60L, 70L, 80L)
 # Finer eps quantization + broader minPts set (still discrete across cities)
 eps_step <- 0.02
 minPts_allowed <- c(8L, 10L, 12L, 15L, 20L, 25L, 30L, 40L, 50L)
