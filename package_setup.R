@@ -318,3 +318,42 @@ for (city_id in names(prepared)) {
 
 grid_df <- dplyr::bind_rows(results)
 print(grid_df)
+
+############################################################
+# Step 7 — Final DBSCAN parameters (per city)
+############################################################
+
+dbscan_params <- list(
+  berlin  = list(eps = 0.4, minPts = 20),
+  munich  = list(eps = 0.5, minPts = 30),
+  cologne = list(eps = 0.5, minPts = 20)
+)
+
+############################################################
+# Step 7a — Final DBSCAN run (all cities)
+############################################################
+
+for (city_id in names(prepared)) {
+
+  params <- dbscan_params[[city_id]]
+
+  db_final <- dbscan(
+    prepared[[city_id]]$X_scaled,
+    eps    = params$eps,
+    minPts = params$minPts
+  )
+
+  stopifnot(
+    length(db_final$cluster) == nrow(prepared[[city_id]]$city_clean)
+  )
+
+  prepared[[city_id]]$city_clean$cluster <- db_final$cluster
+
+  cat(
+    "DBSCAN done |",
+    city_id,
+    "| eps =", params$eps,
+    "| minPts =", params$minPts,
+    "\n"
+  )
+}
