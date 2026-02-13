@@ -996,13 +996,25 @@ for (city_id in names(nsga_param_results)) {
 
   res <- nsga_param_results[[city_id]]
 
+  eps_raw <- res$par[, 1]
+  minPts_raw <- as.integer(round(res$par[, 2]))
+
+  # snap back to the same discrete search grid for fair comparison
+  eps_snap <- round(eps_min + round((eps_raw - eps_min) / eps_step) * eps_step, 3)
+  eps_snap <- pmax(eps_min, pmin(eps_snap, eps_max))
+  minPts_raw <- pmax(minPts_min, pmin(minPts_raw, minPts_max))
+  minPts_snap <- vapply(minPts_raw, function(v) minPts_allowed[which.min(abs(minPts_allowed - v))], integer(1))
+
   pareto_tables[[city_id]] <- data.frame(
     city = city_id,
-    eps = res$par[, 1],
-    minPts = as.integer(round(res$par[, 2])),
+    eps = eps_snap,
+    minPts = as.integer(minPts_snap),
     coverage = -res$value[, 1],
     dir_cohesion = -res$value[, 2]
   )
+
+  # filter fallback objective values (f2 = 1 => dir_cohesion = -1) before knee selection
+  pareto_tables[[city_id]] <- pareto_tables[[city_id]][pareto_tables[[city_id]]$dir_cohesion >= 0, ]
 
   # remove duplicate parameter pairs
   pareto_tables[[city_id]] <- pareto_tables[[city_id]][
@@ -1018,6 +1030,12 @@ knee_solutions <- list()
 for (city_id in names(pareto_tables)) {
 
   df <- pareto_tables[[city_id]]
+
+  if (nrow(df) == 0) {
+    warning("No valid Pareto rows with non-negative dir_cohesion for ", city_id)
+    knee_solutions[[city_id]] <- NA
+    next
+  }
 
   # Normalize to [0,1]
   cov_n <- (df$coverage - min(df$coverage)) / (max(df$coverage) - min(df$coverage) + 1e-9)
