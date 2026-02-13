@@ -941,17 +941,17 @@ data_for_opt <- prepared_sub
 
 set.seed(1)
 
-# Expanded bounds to avoid empty Pareto fronts (notably Munich)
+# Expanded bounds and finer grid for richer Pareto fronts
 eps_min <- 0.20
 eps_max <- 0.60
-minPts_min <- 10
+minPts_min <- 8
 minPts_max <- 50
-# Keep comparable step, but allow lower-density regimes when needed
-eps_step <- 0.05
-minPts_allowed <- c(10L, 15L, 20L, 30L, 50L)
+# Finer eps quantization + broader minPts set (still discrete across cities)
+eps_step <- 0.02
+minPts_allowed <- c(8L, 10L, 12L, 15L, 20L, 25L, 30L, 40L, 50L)
 
-popsize <- 40
-generations <- 25
+popsize <- 80
+generations <- 60
 
 objfun_params <- list()
 nsga_param_results <- list()
@@ -1014,13 +1014,25 @@ for (city_id in names(nsga_param_results)) {
     dir_cohesion = -res$value[, 2]
   )
 
+  n_before <- nrow(pareto_tables[[city_id]])
+
   # filter fallback objective values (f2 = 1 => dir_cohesion = -1) before knee selection
   pareto_tables[[city_id]] <- pareto_tables[[city_id]][pareto_tables[[city_id]]$dir_cohesion >= 0, ]
+  n_after_filter <- nrow(pareto_tables[[city_id]])
 
   # remove duplicate parameter pairs
   pareto_tables[[city_id]] <- pareto_tables[[city_id]][
     !duplicated(pareto_tables[[city_id]][, c("eps", "minPts")]),
   ]
+  n_after_dedup <- nrow(pareto_tables[[city_id]])
+
+  cat(
+    "CITY:", toupper(city_id),
+    "| n_before =", n_before,
+    "| n_after_filter =", n_after_filter,
+    "| n_after_dedup =", n_after_dedup,
+    "\n"
+  )
 
   cat("\n---", toupper(city_id), "Pareto solutions (head) ---\n")
   print(head(pareto_tables[[city_id]], 10))
