@@ -1124,3 +1124,104 @@ for (city_id in names(pareto_tables)) {
 
   print(p)
 }
+
+############################################################
+# Step 15 — Full-data evaluation (EXPERT configuration)
+############################################################
+
+expert_eval <- list()
+
+for (city_id in names(dbscan_params)) {
+
+  params <- dbscan_params[[city_id]]
+
+  X_full <- prepared[[city_id]]$X_scaled
+  dt_full <- prepared[[city_id]]$city_clean
+
+  db <- dbscan(X_full, eps = params$eps, minPts = params$minPts)
+  cl <- db$cluster
+
+  n_clustered <- sum(cl != 0)
+  cov_pct <- 100 * n_clustered / length(cl)
+
+  tmp <- data.table::as.data.table(dt_full)
+  tmp[, cluster := cl]
+  agg <- tmp[cluster != 0 & is.finite(dx) & is.finite(dy),
+             .(mean_dx = mean(dx), mean_dy = mean(dy)),
+             by = cluster]
+
+  if (nrow(agg) < 2) {
+    dir_full <- NA_real_
+  } else {
+    v <- as.matrix(agg[, .(mean_dx, mean_dy)])
+    norms <- sqrt(rowSums(v^2))
+    norms[norms == 0] <- 1
+    u <- v / norms
+    dir_full <- dir_concentration_unweighted(seq_len(nrow(u)), u)
+  }
+
+  expert_eval[[city_id]] <- data.frame(
+    city = city_id,
+    config = "expert",
+    eps = params$eps,
+    minPts = params$minPts,
+    clustered_trips = n_clustered,
+    clustered_pct = cov_pct,
+    dir_cohesion = dir_full,
+    n_clusters = length(unique(cl[cl != 0])),
+    noise_pct = 100 * sum(cl == 0) / length(cl),
+    n_total = length(cl)
+  )
+
+  cat("Expert full eval done:", toupper(city_id), "\n")
+}
+
+expert_eval_df <- do.call(rbind, expert_eval)
+
+############################################################
+# Step 15a — Cluster size quick check (non-noise)
+############################################################
+
+for (city_id in names(prepared)) {
+  cl <- prepared[[city_id]]$city_clean$cluster
+  cat(city_id, "cluster sizes (non-noise):\n")
+  print(head(sort(table(cl[cl != 0]), decreasing = TRUE), 10))
+  cat("\n")
+}
+
+############################################################
+# Step 15b — Compare expert vs knee table (if knee eval exists)
+############################################################
+
+if (exists("full_eval_df") && is.data.frame(full_eval_df)) {
+  knee_eval_df <- full_eval_df %>%
+    dplyr::mutate(config = "knee")
+
+  expert_eval_df <- expert_eval_df %>%
+    dplyr::mutate(config = "expert")
+
+  compare_df <- dplyr::bind_rows(expert_eval_df, knee_eval_df) %>%
+    dplyr::select(city, config, eps, minPts,
+                  clustered_trips, clustered_pct,
+                  dir_cohesion, n_clusters, noise_pct, n_total) %>%
+    dplyr::arrange(city, config)
+
+  print(compare_df)
+
+  compare_df_pretty <- compare_df %>%
+    dplyr::mutate(
+      eps = round(eps, 3),
+      clustered_pct = round(clustered_pct, 2),
+      dir_cohesion = round(dir_cohesion, 3),
+      noise_pct = round(noise_pct, 2)
+    )
+
+  print(compare_df_pretty)
+} else {
+  cat("full_eval_df not found; skipping expert vs knee comparison table.\n")
+}
+
+# get unique Pareto configs (per city)
+pareto_unique <- lapply(pareto_tables, function(df) {
+  df[!duplicated(df[, c("eps", "minPts")]), ]
+})
