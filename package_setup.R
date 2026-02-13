@@ -1050,3 +1050,65 @@ for (city_id in names(pareto_tables)) {
   cat("\nKNEE:", toupper(city_id), "\n")
   print(knee_solutions[[city_id]])
 }
+
+############################################################
+# Step 14c — Pareto scatter plot (per city)
+############################################################
+
+plot_pareto <- function(df, knee = NULL, expert = NULL, city_name) {
+
+  p <- ggplot(df, aes(x = coverage, y = dir_cohesion)) +
+    geom_point(color = "steelblue", size = 2, alpha = 0.8) +
+    labs(
+      title = paste("Pareto front —", toupper(city_name)),
+      x = "Coverage (number of clustered trips)",
+      y = "Directional cohesion"
+    ) +
+    theme_minimal()
+
+  # Knee solution (highlighted)
+  if (!is.null(knee) && is.data.frame(knee) && nrow(knee) > 0) {
+    p <- p +
+      geom_point(
+        data = knee,
+        aes(x = coverage, y = dir_cohesion),
+        color = "red",
+        size = 4
+      )
+  }
+
+  # Expert configuration (optional)
+  if (!is.null(expert) && is.data.frame(expert) && nrow(expert) > 0) {
+    p <- p +
+      geom_point(
+        data = expert,
+        aes(x = coverage, y = dir_cohesion),
+        shape = 4,        # cross
+        color = "black",
+        size = 4,
+        stroke = 1.2
+      )
+  }
+
+  p
+}
+
+for (city_id in names(pareto_tables)) {
+
+  df_city <- pareto_tables[[city_id]]
+  if (is.null(df_city) || nrow(df_city) == 0) {
+    cat("Skipping plot for", toupper(city_id), "(no valid Pareto rows).\n")
+    next
+  }
+
+  knee_city <- knee_solutions[[city_id]]
+  if (!is.data.frame(knee_city)) knee_city <- NULL
+
+  p <- plot_pareto(
+    df = df_city,
+    knee = knee_city,
+    city_name = city_id
+  )
+
+  print(p)
+}
