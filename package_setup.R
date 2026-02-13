@@ -162,3 +162,22 @@ for (city_id in names(prepared)) {
 # - 20-30: moderate neighborhood size (often stable)
 # - 50   : stress-test for over-smoothing
 k_values <- c(10, 20, 30, 50)
+
+############################################################
+# Step 3a — Plot layout setup (kNN-distance diagnostics)
+#
+# WHY this step:
+# - We visualize multiple kNN-distance plots side-by-side
+#   to compare neighborhood scales for different k values.
+# - A fixed 2x2 layout is sufficient for the chosen k grid (4 values).
+#
+# SAFETY:
+# - We store the original graphical parameters and restore them later
+#   to avoid side effects on subsequent plots.
+############################################################
+
+# Save current graphical parameters
+old_par <- par(no.readonly = TRUE)
+
+# Set plotting layout (one panel per k value)
+par(mfrow = c(2, 2))
