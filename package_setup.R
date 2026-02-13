@@ -941,13 +941,14 @@ data_for_opt <- prepared_sub
 
 set.seed(1)
 
-eps_min <- 0.30
+# Expanded bounds to avoid empty Pareto fronts (notably Munich)
+eps_min <- 0.20
 eps_max <- 0.60
-minPts_min <- 20
+minPts_min <- 10
 minPts_max <- 50
-# align with earlier grid for fair comparison
+# Keep comparable step, but allow lower-density regimes when needed
 eps_step <- 0.05
-minPts_allowed <- c(20L, 30L, 50L)
+minPts_allowed <- c(10L, 15L, 20L, 30L, 50L)
 
 popsize <- 40
 generations <- 25
