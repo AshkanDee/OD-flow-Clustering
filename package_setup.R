@@ -263,3 +263,58 @@ for (city_id in names(prepared)) {
   cat("X_scaled head:\n")
   print(head(prepared[[city_id]]$X_scaled))
 }
+
+############################################################
+# Step 6 — DBSCAN grid search
+# WHY: evaluate clustering structure across (eps, minPts) values
+############################################################
+
+results <- list()
+idx <- 1
+
+for (city_id in names(prepared)) {
+
+  X_scaled <- prepared[[city_id]]$X_scaled
+  n_total  <- nrow(X_scaled)
+
+  for (k in k_grid) {
+    for (eps_val in eps_grid) {
+
+      db <- dbscan(X_scaled, eps = eps_val, minPts = k)
+      cl <- db$cluster
+
+      n_noise   <- sum(cl == 0)
+      noise_pct <- 100 * n_noise / length(cl)
+
+      n_clusters <- length(unique(cl[cl != 0]))
+
+      max_cluster_size <- if (n_clusters > 0) {
+        max(table(cl[cl != 0]))
+      } else {
+        0
+      }
+
+      max_cluster_pct <- if (n_clusters > 0) {
+        100 * max_cluster_size / length(cl)
+      } else {
+        0
+      }
+
+      results[[idx]] <- data.frame(
+        city = city_id,
+        algorithm = "DBSCAN",
+        minPts = k,
+        eps = eps_val,
+        n_clusters = n_clusters,
+        noise_pct = noise_pct,
+        max_cluster_pct = max_cluster_pct,
+        n_total = n_total
+      )
+
+      idx <- idx + 1
+    }
+  }
+}
+
+grid_df <- dplyr::bind_rows(results)
+print(grid_df)
