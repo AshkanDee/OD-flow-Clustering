@@ -357,3 +357,12 @@ for (city_id in names(prepared)) {
     "\n"
   )
 }
+
+############################################################
+# DBSCAN parameter bounds (NSGA-II)
+############################################################
+
+dbscan_bounds <- list(
+  eps_idx = c(1L, 40L),   # index into kNN-distance quantiles
+  minPts  = c(3L, 60L)    # density requirement
+)
