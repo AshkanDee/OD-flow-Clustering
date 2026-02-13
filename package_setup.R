@@ -213,3 +213,53 @@ for (city_id in names(prepared)) {
 # Restore original graphics settings
 par(old_par)
 
+
+
+############################################################
+# Step 4 — DBSCAN parameter grids
+# WHY: explore sensitivity of density scale (eps) and minPts
+############################################################
+
+# Neighborhood radius candidates
+eps_grid <- c(0.2, 0.3, 0.4, 0.5, 0.6)
+
+# minPts candidates (aligned with kNN diagnostics)
+k_grid <- c(20, 30, 50)
+
+############################################################
+# Step 5 — Initialize results container
+# WHY: collect clustering outputs across cities and parameters
+############################################################
+
+results <- list()
+
+############################################################
+# Step 5a — Result index counter
+# WHY: sequentially store results in a list
+############################################################
+
+idx <- 1
+
+############################################################
+# Step 5b — Sanity checks / debugging prints
+############################################################
+
+# Index counter
+if (exists("idx")) print(idx)
+
+# Parameter grids
+print(k_values)
+print(eps_grid)
+print(k_grid)
+
+# Results container
+if (exists("results")) print(results)
+
+# Check feature matrices per city
+for (city_id in names(prepared)) {
+  cat("\n---", toupper(city_id), "---\n")
+  cat("X head:\n")
+  print(head(prepared[[city_id]]$X))
+  cat("X_scaled head:\n")
+  print(head(prepared[[city_id]]$X_scaled))
+}
