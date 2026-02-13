@@ -1225,3 +1225,132 @@ if (exists("full_eval_df") && is.data.frame(full_eval_df)) {
 pareto_unique <- lapply(pareto_tables, function(df) {
   df[!duplicated(df[, c("eps", "minPts")]), ]
 })
+
+############################################################
+# Step 16 — Validate selected Pareto configs on full data
+############################################################
+
+select_configs <- function(df, knee_row, n_neighbors = 2) {
+  if (is.null(df) || nrow(df) == 0) return(df)
+
+  # extremes
+  i_cov <- which.max(df$coverage)
+  i_coh <- which.max(df$dir_cohesion)
+
+  # if knee is unavailable, fall back to extremes only
+  if (is.null(knee_row) || !is.data.frame(knee_row) || nrow(knee_row) == 0) {
+    idx <- unique(c(i_cov, i_coh))
+    return(df[idx, , drop = FALSE])
+  }
+
+  # neighbors by Euclidean distance in normalized objective space
+  cov_n <- (df$coverage - min(df$coverage)) / (max(df$coverage) - min(df$coverage) + 1e-9)
+  coh_n <- (df$dir_cohesion - min(df$dir_cohesion)) / (max(df$dir_cohesion) - min(df$dir_cohesion) + 1e-9)
+
+  knee_cov_n <- (knee_row$coverage - min(df$coverage)) / (max(df$coverage) - min(df$coverage) + 1e-9)
+  knee_coh_n <- (knee_row$dir_cohesion - min(df$dir_cohesion)) / (max(df$dir_cohesion) - min(df$dir_cohesion) + 1e-9)
+
+  d <- sqrt((cov_n - knee_cov_n)^2 + (coh_n - knee_coh_n)^2)
+  neigh <- order(d)[1:min(n_neighbors + 1, nrow(df))]  # includes knee itself
+  idx <- unique(c(i_cov, i_coh, neigh))
+
+  df[idx, , drop = FALSE]
+}
+
+full_eval_one <- function(city_id, eps, minPts, prepared) {
+  X_full <- prepared[[city_id]]$X_scaled
+  dt_full <- data.table::as.data.table(prepared[[city_id]]$city_clean)
+
+  db <- dbscan::dbscan(X_full, eps = eps, minPts = minPts)
+  cl <- db$cluster
+
+  n_clustered <- sum(cl != 0)
+  cov_pct <- 100 * n_clustered / length(cl)
+
+  dt_full[, cluster := cl]
+  agg <- dt_full[cluster != 0 & is.finite(dx) & is.finite(dy),
+                 .(mean_dx = mean(dx), mean_dy = mean(dy)),
+                 by = cluster]
+
+  dir_full <- NA_real_
+  if (nrow(agg) >= 2) {
+    v <- as.matrix(agg[, .(mean_dx, mean_dy)])
+    norms <- sqrt(rowSums(v^2))
+    norms[norms == 0] <- 1
+    u <- v / norms
+    dir_full <- dir_concentration_unweighted(seq_len(nrow(u)), u)
+  }
+
+  data.frame(
+    city = city_id,
+    eps = eps,
+    minPts = minPts,
+    clustered_trips = n_clustered,
+    clustered_pct = cov_pct,
+    dir_cohesion = dir_full,
+    n_clusters = length(unique(cl[cl != 0])),
+    noise_pct = 100 * sum(cl == 0) / length(cl),
+    n_total = length(cl)
+  )
+}
+
+full_validated <- list()
+
+for (city_id in names(pareto_unique)) {
+
+  df <- pareto_unique[[city_id]]
+  knee <- knee_solutions[[city_id]]
+
+  chosen <- select_configs(df, knee_row = knee, n_neighbors = 2)
+
+  if (is.null(chosen) || nrow(chosen) == 0) {
+    cat("No configs to validate for", toupper(city_id), "\n")
+    next
+  }
+
+  cat("\nValidating", nrow(chosen), "configs on FULL data for", toupper(city_id), "\n")
+
+  out <- do.call(rbind, lapply(seq_len(nrow(chosen)), function(i) {
+    full_eval_one(city_id, chosen$eps[i], chosen$minPts[i], prepared)
+  }))
+
+  out$config_tag <- "pareto_selected"
+  full_validated[[city_id]] <- out
+}
+
+full_validated_df <- if (length(full_validated) > 0) do.call(rbind, full_validated) else data.frame()
+print(full_validated_df)
+
+if (nrow(full_validated_df) > 0) {
+  knee_full <- full_validated_df %>%
+    dplyr::group_by(city) %>%
+    dplyr::mutate(
+      cov_n = (clustered_pct - min(clustered_pct)) / (max(clustered_pct) - min(clustered_pct) + 1e-9),
+      coh_n = (dir_cohesion - min(dir_cohesion)) / (max(dir_cohesion) - min(dir_cohesion) + 1e-9),
+      dist_ideal = sqrt((1 - cov_n)^2 + (1 - coh_n)^2)
+    ) %>%
+    dplyr::slice_min(dist_ideal, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(city, eps, minPts, clustered_trips, clustered_pct, dir_cohesion, n_clusters, noise_pct)
+
+  print(knee_full)
+
+  knee_final_df <- knee_full %>%
+    dplyr::mutate(config = "knee_final") %>%
+    dplyr::select(city, config, eps, minPts,
+                  clustered_trips, clustered_pct,
+                  dir_cohesion, n_clusters, noise_pct)
+
+  expert_df <- expert_eval_df %>%
+    dplyr::mutate(config = "expert") %>%
+    dplyr::select(city, config, eps, minPts,
+                  clustered_trips, clustered_pct,
+                  dir_cohesion, n_clusters, noise_pct)
+
+  compare_df <- dplyr::bind_rows(expert_df, knee_final_df) %>%
+    dplyr::arrange(city, factor(config, levels = c("expert", "knee_final")))
+
+  print(compare_df)
+} else {
+  cat("full_validated_df is empty; skipping knee_final comparison.\n")
+}
