@@ -193,7 +193,7 @@ for (city_id in names(prepared)) {
 
   cat("\nPlotting kNN-distance curves for:", toupper(city_id), "\n")
 
-  old_par <- par(no.readonly = TRUE)
+  old_par_city <- par(no.readonly = TRUE)
   par(mfrow = c(2, 2))
 
   for (k in k_values) {
@@ -207,6 +207,9 @@ for (city_id in names(prepared)) {
     grid()
   }
 
-  par(old_par)
+  par(old_par_city)
 }
+
+# Restore original graphics settings
+par(old_par)
 
