@@ -181,3 +181,32 @@ old_par <- par(no.readonly = TRUE)
 
 # Set plotting layout (one panel per k value)
 par(mfrow = c(2, 2))
+
+############################################################
+# Step 3b — kNN-distance plots
+# WHY: visual support for choosing a reasonable eps scale
+############################################################
+
+for (city_id in names(prepared)) {
+
+  X_scaled <- prepared[[city_id]]$X_scaled
+
+  cat("\nPlotting kNN-distance curves for:", toupper(city_id), "\n")
+
+  old_par <- par(no.readonly = TRUE)
+  par(mfrow = c(2, 2))
+
+  for (k in k_values) {
+    kNN <- kNNdist(X_scaled, k = k)
+
+    plot(sort(kNN), type = "l",
+         xlab = "Points sorted by distance",
+         ylab = paste0(k, "-NN distance"),
+         main = paste(city_id, "| kNN distance (k =", k, ")"))
+
+    grid()
+  }
+
+  par(old_par)
+}
+
