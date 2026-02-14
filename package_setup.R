@@ -1767,3 +1767,164 @@ for (city_id in names(prepared)) {
     show_plots = TRUE
   )
 }
+
+############################################################
+# Step 19 — DBCV comparison for current expert vs knee configs
+# (aligned with current pipeline objects; no manual ??? placeholders)
+############################################################
+
+set.seed(1)
+
+# DBCV on stratified non-noise sample with optional tiny-cluster filtering
+dbcv_stratified <- function(X_scaled, cl_full,
+                            N_MAX_TOTAL = 20000,
+                            N_MAX_PERCLUSTER = 2000,
+                            MIN_CLUSTER_FOR_DBCV = 3) {
+
+  keep <- cl_full != 0
+  Xc <- X_scaled[keep, , drop = FALSE]
+  cl <- cl_full[keep]
+
+  if (length(unique(cl)) < 2) return(NA_real_)
+
+  dt <- data.table::data.table(idx = seq_along(cl), cluster = cl)
+  samp_idx <- dt[, .(idx = sample(idx, size = min(.N, N_MAX_PERCLUSTER))), by = cluster]$idx
+
+  if (length(samp_idx) > N_MAX_TOTAL) {
+    samp_idx <- sample(samp_idx, N_MAX_TOTAL)
+  }
+
+  X_s <- Xc[samp_idx, , drop = FALSE]
+  cl_s <- cl[samp_idx]
+
+  tab <- table(cl_s)
+  keep_clusters <- names(tab)[tab >= MIN_CLUSTER_FOR_DBCV]
+  keep2 <- cl_s %in% keep_clusters
+  X_s <- X_s[keep2, , drop = FALSE]
+  cl_s <- cl_s[keep2]
+
+  cl_s <- as.integer(factor(cl_s))
+  if (length(unique(cl_s)) < 2) return(NA_real_)
+
+  out <- tryCatch(
+    dbscan::dbcv(X_s, cl_s, d = ncol(X_s), metric = "euclidean"),
+    error = function(e) e
+  )
+
+  if (inherits(out, "error")) return(NA_real_)
+
+  if (is.list(out) && !is.null(out$score)) return(as.numeric(out$score))
+  if (is.numeric(out) && length(out) == 1) return(as.numeric(out))
+
+  NA_real_
+}
+
+# Evaluate one city/config on FULL data
+eval_dbcv_for_config <- function(city_id, eps, minPts, prepared,
+                                 N_MAX_TOTAL = 20000,
+                                 N_MAX_PERCLUSTER = 2000,
+                                 MIN_CLUSTER_FOR_DBCV = 3) {
+
+  X_scaled <- prepared[[city_id]]$X_scaled
+
+  db <- dbscan::dbscan(X_scaled, eps = eps, minPts = minPts)
+  cl <- db$cluster
+
+  N_total <- length(cl)
+  n_clustered <- sum(cl != 0)
+  coverage_raw <- if (N_total > 0) n_clustered / N_total else 0
+  K <- length(unique(cl[cl != 0]))
+  penalty <- if (K == 0) 0 else (1 - log(K + 1) / log(N_total + 1))
+  coverage_eff <- coverage_raw * penalty
+
+  dbcv_val <- dbcv_stratified(
+    X_scaled = X_scaled,
+    cl_full = cl,
+    N_MAX_TOTAL = N_MAX_TOTAL,
+    N_MAX_PERCLUSTER = N_MAX_PERCLUSTER,
+    MIN_CLUSTER_FOR_DBCV = MIN_CLUSTER_FOR_DBCV
+  )
+
+  tibble::tibble(
+    city = city_id,
+    eps = eps,
+    minPts = minPts,
+    n_clusters = K,
+    coverage_eff = coverage_eff,
+    clustered_pct = 100 * coverage_raw,
+    dbcv = dbcv_val
+  )
+}
+
+# Build expert configs from current pipeline source of truth
+expert_params <- dplyr::bind_rows(lapply(names(dbscan_params), function(city_id) {
+  p <- dbscan_params[[city_id]]
+  tibble::tibble(
+    city = city_id,
+    eps = as.numeric(p$eps),
+    minPts = as.integer(round(p$minPts)),
+    config = "expert"
+  )
+}))
+
+# Build knee configs from full-data knee if available, else fallback to full_eval_df
+if (exists("knee_full") && is.data.frame(knee_full) && nrow(knee_full) > 0) {
+  knee_params <- knee_full %>%
+    dplyr::select(city, eps, minPts) %>%
+    dplyr::mutate(config = "knee_full")
+} else if (exists("full_eval_df") && is.data.frame(full_eval_df) && nrow(full_eval_df) > 0) {
+  knee_params <- full_eval_df %>%
+    dplyr::select(city, eps, minPts) %>%
+    dplyr::mutate(config = "knee_full")
+} else {
+  knee_params <- tibble::tibble(city = character(), eps = numeric(), minPts = integer(), config = character())
+}
+
+# Legacy-compatible lookup list for any old code snippets
+knee_params_list <- lapply(split(knee_params, knee_params$city), function(x) {
+  list(eps = as.numeric(x$eps[1]), minPts = as.integer(round(x$minPts[1])))
+})
+
+params_to_eval <- dplyr::bind_rows(expert_params, knee_params) %>%
+  dplyr::distinct(city, eps, minPts, config)
+
+if (nrow(params_to_eval) == 0) {
+  dbcv_compare_df <- data.frame()
+  cat("No expert/knee configs found for DBCV evaluation.\n")
+} else {
+  N_MAX_TOTAL <- 20000
+  N_MAX_PERCLUSTER <- 2000
+  MIN_CLUSTER_FOR_DBCV <- 3
+
+  dbcv_compare <- lapply(seq_len(nrow(params_to_eval)), function(i) {
+    row <- params_to_eval[i, ]
+
+    out <- eval_dbcv_for_config(
+      city_id = row$city,
+      eps = row$eps,
+      minPts = row$minPts,
+      prepared = prepared,
+      N_MAX_TOTAL = N_MAX_TOTAL,
+      N_MAX_PERCLUSTER = N_MAX_PERCLUSTER,
+      MIN_CLUSTER_FOR_DBCV = MIN_CLUSTER_FOR_DBCV
+    )
+
+    out$config <- row$config
+
+    cat(
+      "CITY:", toupper(row$city),
+      "| config =", row$config,
+      "| eps =", round(row$eps, 3),
+      "| minPts =", row$minPts,
+      "| DBCV =", ifelse(is.na(out$dbcv[1]), "NA", sprintf("%.3f", out$dbcv[1])),
+      "\n"
+    )
+
+    out
+  })
+
+  dbcv_compare_df <- dplyr::bind_rows(dbcv_compare) %>%
+    dplyr::arrange(city, factor(config, levels = c("expert", "knee_full")))
+
+  print(dbcv_compare_df)
+}
