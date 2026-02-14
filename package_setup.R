@@ -1407,7 +1407,7 @@ if (nrow(full_validated_df) > 0) {
   knee_full <- full_validated_df %>%
     dplyr::group_by(city) %>%
     dplyr::mutate(
-      cov_n = (clustered_pct - min(clustered_pct)) / (max(clustered_pct) - min(clustered_pct) + 1e-9),
+      cov_n = (coverage_eff - min(coverage_eff)) / (max(coverage_eff) - min(coverage_eff) + 1e-9),
       coh_n = (dir_cohesion - min(dir_cohesion)) / (max(dir_cohesion) - min(dir_cohesion) + 1e-9),
       dist_ideal = sqrt((1 - cov_n)^2 + (1 - coh_n)^2)
     ) %>%
@@ -1438,74 +1438,199 @@ if (nrow(full_validated_df) > 0) {
 }
 
 ############################################################
-# Step 17 — Hypervolume preprocessing inputs (minimization form)
+# Step 17 — Hypervolume analysis for Pareto fronts (effective coverage + cohesion)
+# - Uses Pareto columns: coverage (= effective coverage), dir_cohesion
+# - Global normalization across cities, then MIN conversion for HV
 ############################################################
 
-to_hv_min <- function(df, coverage_col = "coverage", cohesion_col = "dir_cohesion") {
+# Non-dominated filter for MINIMIZATION
+nondominated_min <- function(F) {
+  n <- nrow(F)
+  keep <- rep(TRUE, n)
+  for (i in seq_len(n)) {
+    if (!keep[i]) next
+    for (j in seq_len(n)) {
+      if (i == j || !keep[i]) next
+      if (all(F[j, ] <= F[i, ]) && any(F[j, ] < F[i, ])) {
+        keep[i] <- FALSE
+      }
+    }
+  }
+  F[keep, , drop = FALSE]
+}
 
+# Exact 2D dominated hypervolume for MINIMIZATION
+hv2d_min <- function(F, ref) {
+  if (nrow(F) == 0) return(0)
+
+  F <- nondominated_min(F)
+  o <- order(F[, 1], F[, 2])
+  F <- F[o, , drop = FALSE]
+
+  hv <- 0
+  h <- ref[2]
+  for (i in seq_len(nrow(F))) {
+    f1 <- F[i, 1]
+    f2 <- F[i, 2]
+    if (f2 < h) {
+      hv <- hv + (ref[1] - f1) * (h - f2)
+      h <- f2
+    }
+  }
+  hv
+}
+
+# Leave-one-out HV contributions
+hv2d_contrib_min <- function(F, ref) {
+  hv_all <- hv2d_min(F, ref)
+  n <- nrow(F)
+  sapply(seq_len(n), function(i) hv_all - hv2d_min(F[-i, , drop = FALSE], ref))
+}
+
+# Safe normalization
+safe_norm <- function(z, zmin, zmax) {
+  if (!is.finite(zmin) || !is.finite(zmax) || isTRUE(all.equal(zmax, zmin))) {
+    return(rep(0, length(z)))
+  }
+  (z - zmin) / (zmax - zmin)
+}
+
+# Gini coefficient for contribution concentration
+gini <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  x <- sort(pmax(0, x))
+  s <- sum(x)
+  if (s <= 0) return(0)
+  n <- length(x)
+  (2 * sum(seq_len(n) * x) / (n * s)) - (n + 1) / n
+}
+
+# Convert Pareto table (MAX objectives) to minimization form for HV
+# NOTE: 'coverage' in pareto_tables is effective coverage from Step 14 objective.
+to_hv_min <- function(df, coverage_col = "coverage", cohesion_col = "dir_cohesion") {
   df %>%
     dplyr::transmute(
       eps, minPts,
-      f1 = - .data[[coverage_col]],      # minimize negative coverage
-      f2 = - .data[[cohesion_col]]       # minimize negative cohesion
+      f1 = 1 - .data[[coverage_col]],
+      f2 = 1 - .data[[cohesion_col]]
     )
 }
 
-check_transform <- function(df) {
-  cat("Raw best coverage:", max(df$coverage), "\n")
-  cat("Raw best cohesion:", max(df$dir_cohesion), "\n")
+# Global bounds across cities (for consistent normalization)
+all_pts <- do.call(rbind, lapply(names(pareto_tables), function(city_id) {
+  df <- pareto_tables[[city_id]][, c("coverage", "dir_cohesion")]
+  df <- df[is.finite(df$coverage) & is.finite(df$dir_cohesion), , drop = FALSE]
+  if (nrow(df) == 0) return(NULL)
+  df
+}))
 
-  hv <- to_hv_min(df)
-  cat("Min f1 (should correspond to max coverage):", min(hv$f1), "\n")
-  cat("Min f2 (should correspond to max cohesion):", min(hv$f2), "\n")
+if (is.null(all_pts) || nrow(all_pts) == 0) {
+  hv_results <- data.frame()
+  cat("No valid Pareto points available for HV analysis.\n")
+} else {
+  cov_min <- min(all_pts$coverage, na.rm = TRUE)
+  cov_max <- max(all_pts$coverage, na.rm = TRUE)
+  coh_min <- min(all_pts$dir_cohesion, na.rm = TRUE)
+  coh_max <- max(all_pts$dir_cohesion, na.rm = TRUE)
+
+  ref_min <- c(1.05, 1.05)
+  hv_max <- prod(ref_min - c(0, 0))
+
+  hv_results <- do.call(rbind, lapply(names(pareto_tables), function(city_id) {
+    df <- pareto_tables[[city_id]][, c("coverage", "dir_cohesion")]
+    df <- df[is.finite(df$coverage) & is.finite(df$dir_cohesion), , drop = FALSE]
+
+    if (nrow(df) == 0) {
+      return(data.frame(
+        city = city_id,
+        n_points = 0,
+        hv_raw = NA_real_,
+        hv_unit = NA_real_,
+        contrib_gini = NA_real_,
+        contrib_top10_share = NA_real_,
+        contrib_cv = NA_real_
+      ))
+    }
+
+    cov_n <- safe_norm(df$coverage, cov_min, cov_max)
+    coh_n <- safe_norm(df$dir_cohesion, coh_min, coh_max)
+
+    Fmin <- cbind(f1 = 1 - cov_n, f2 = 1 - coh_n)
+
+    hv_raw <- hv2d_min(Fmin, ref_min)
+    hv_unit <- hv_raw / hv_max
+
+    contrib <- hv2d_contrib_min(Fmin, ref_min)
+    contrib <- contrib[is.finite(contrib)]
+
+    top10_share <- if (length(contrib) == 0 || sum(contrib) == 0) NA_real_ else {
+      n_top <- max(1, floor(0.1 * length(contrib)))
+      sum(sort(contrib, decreasing = TRUE)[seq_len(n_top)]) / sum(contrib)
+    }
+
+    data.frame(
+      city = city_id,
+      n_points = nrow(df),
+      hv_raw = hv_raw,
+      hv_unit = hv_unit,
+      contrib_gini = gini(contrib),
+      contrib_top10_share = top10_share,
+      contrib_cv = if (length(contrib) > 1 && mean(contrib) > 0) sd(contrib) / mean(contrib) else NA_real_
+    )
+  }))
+
+  hv_results <- hv_results[order(-hv_results$hv_unit), ]
+  print(hv_results)
+
+  hv_summary_df <- hv_results %>%
+    dplyr::transmute(
+      city,
+      hv_unit,
+      gini = contrib_gini
+    )
+
+  hv_df <- hv_summary_df
+  hv_shape_df <- hv_summary_df
+
+  print(range(hv_df$hv_unit, na.rm = TRUE))
 }
 
-validate_hv_input <- function(hv_df) {
-  stopifnot(all(is.finite(hv_df$f1)), all(is.finite(hv_df$f2)))
-  invisible(TRUE)
-}
-
-make_ref <- function(hv_df, pad = 0.1) {
-  c(
-    max(hv_df$f1) + pad * abs(max(hv_df$f1)),
-    max(hv_df$f2) + pad * abs(max(hv_df$f2))
+# Optional plots (run only if there are valid rows)
+if (exists("hv_df") && is.data.frame(hv_df) && nrow(hv_df) > 0) {
+  print(
+    ggplot(hv_df, aes(x = city, y = hv_unit, fill = city)) +
+      geom_col(width = 0.6) +
+      labs(
+        title = "Unit-scaled hypervolume by city",
+        x = "City",
+        y = "Hypervolume (0–1)"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "none")
   )
-}
 
-# Example diagnostics for Berlin (if available)
-if (!is.null(pareto_tables$berlin) && nrow(pareto_tables$berlin) > 0) {
-  hv_berlin <- to_hv_min(pareto_tables$berlin)
-  print(summary(hv_berlin))
-  check_transform(pareto_tables$berlin)
-  validate_hv_input(hv_berlin)
-  ref_berlin <- make_ref(hv_berlin)
-  print(ref_berlin)
-}
+  print(
+    ggplot(hv_shape_df, aes(x = city, y = gini, fill = city)) +
+      geom_col(width = 0.6) +
+      labs(
+        title = "Hypervolume shape by city",
+        x = "City",
+        y = "Gini (0 = even, 1 = concentrated)"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "none")
+  )
 
-hv_inputs <- list()
-hv_refs <- list()
-
-for (city_id in names(pareto_tables)) {
-  df_city <- pareto_tables[[city_id]]
-  if (is.null(df_city) || nrow(df_city) == 0) next
-
-  hv_inputs[[city_id]] <- to_hv_min(df_city)
-  validate_hv_input(hv_inputs[[city_id]])
-  hv_refs[[city_id]] <- make_ref(hv_inputs[[city_id]])
-}
-
-for (city_id in names(hv_inputs)) {
-  cat("\nCITY:", toupper(city_id), "\n")
-  print(summary(hv_inputs[[city_id]][, c("f1", "f2")]))
-  cat("ref =", hv_refs[[city_id]], "\n")
-}
-
-if (!is.null(hv_inputs$berlin) && !is.null(hv_refs$berlin)) {
-  hv <- hv_inputs$berlin
-  ref <- hv_refs$berlin
-
-  print(c(
-    ref1_ok = ref[1] > max(hv$f1),
-    ref2_ok = ref[2] > max(hv$f2)
-  ))
+  print(
+    ggplot(hv_results, aes(x = hv_unit, y = contrib_gini, label = toupper(city))) +
+      geom_point(size = 3) +
+      geom_text(nudge_y = 0.02) +
+      labs(
+        title = "Global vs shape of Pareto fronts",
+        x = "Global hypervolume (unit-scaled)",
+        y = "Shape (Gini of HV contributions)"
+      ) +
+      theme_minimal()
+  )
 }
