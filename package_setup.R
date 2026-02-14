@@ -7,7 +7,7 @@ if (!requireNamespace("vctrs", quietly = TRUE)) {
 }
 
 # Install required packages for setup + city inspection
-required_packages <- c("data.table", "dbscan", "ggplot2", "dplyr", "mco")
+required_packages <- c("data.table", "dbscan", "ggplot2", "dplyr", "mco", "emoa")
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing_packages) > 0) {
   install.packages(missing_packages)
@@ -21,6 +21,7 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(dplyr)
   library(mco)
+  library(emoa)
 })
 
 ############################################################
@@ -1141,8 +1142,13 @@ for (city_id in names(dbscan_params)) {
   db <- dbscan(X_full, eps = params$eps, minPts = params$minPts)
   cl <- db$cluster
 
+  N_total <- length(cl)
   n_clustered <- sum(cl != 0)
-  cov_pct <- 100 * n_clustered / length(cl)
+  cov_pct <- 100 * n_clustered / N_total
+  coverage_raw <- if (N_total > 0) n_clustered / N_total else 0
+  K <- length(unique(cl[cl != 0]))
+  penalty <- if (K == 0) 0 else (1 - log(K + 1) / log(N_total + 1))
+  coverage_eff <- coverage_raw * penalty
 
   tmp <- data.table::as.data.table(dt_full)
   tmp[, cluster := cl]
@@ -1165,12 +1171,12 @@ for (city_id in names(dbscan_params)) {
     config = "expert",
     eps = params$eps,
     minPts = params$minPts,
-    clustered_trips = n_clustered,
+    coverage_eff = coverage_eff,
     clustered_pct = cov_pct,
     dir_cohesion = dir_full,
-    n_clusters = length(unique(cl[cl != 0])),
-    noise_pct = 100 * sum(cl == 0) / length(cl),
-    n_total = length(cl)
+    n_clusters = K,
+    noise_pct = 100 * sum(cl == 0) / N_total,
+    n_total = N_total
   )
 
   cat("Expert full eval done:", toupper(city_id), "\n")
@@ -1215,8 +1221,13 @@ if (!exists("full_eval_df") || !is.data.frame(full_eval_df)) {
     cl <- db$cluster
 
     # Coverage on full data
+    N_total <- length(cl)
     n_clustered <- sum(cl != 0)
-    cov_pct <- 100 * n_clustered / length(cl)
+    cov_pct <- 100 * n_clustered / N_total
+    coverage_raw <- if (N_total > 0) n_clustered / N_total else 0
+    K <- length(unique(cl[cl != 0]))
+    penalty <- if (K == 0) 0 else (1 - log(K + 1) / log(N_total + 1))
+    coverage_eff <- coverage_raw * penalty
 
     # Cohesion on full data
     tmp <- data.table::as.data.table(dt_full)
@@ -1239,12 +1250,12 @@ if (!exists("full_eval_df") || !is.data.frame(full_eval_df)) {
       city = city_id,
       eps = eps_k,
       minPts = min_k,
-      clustered_trips = n_clustered,
+      coverage_eff = coverage_eff,
       clustered_pct = cov_pct,
       dir_cohesion = dir_full,
-      n_total = length(cl),
-      n_clusters = length(unique(cl[cl != 0])),
-      noise_pct = 100 * sum(cl == 0) / length(cl)
+      n_total = N_total,
+      n_clusters = K,
+      noise_pct = 100 * sum(cl == 0) / N_total
     )
 
     cat("FULL knee eval done:", toupper(city_id), "\n")
@@ -1268,7 +1279,7 @@ if (is.data.frame(full_eval_df) && nrow(full_eval_df) > 0) {
 
   compare_df <- dplyr::bind_rows(expert_eval_df, knee_eval_df) %>%
     dplyr::select(city, config, eps, minPts,
-                  clustered_trips, clustered_pct,
+                  coverage_eff, clustered_pct,
                   dir_cohesion, n_clusters, noise_pct, n_total) %>%
     dplyr::arrange(city, config)
 
@@ -1330,8 +1341,13 @@ full_eval_one <- function(city_id, eps, minPts, prepared) {
   db <- dbscan::dbscan(X_full, eps = eps, minPts = minPts)
   cl <- db$cluster
 
+  N_total <- length(cl)
   n_clustered <- sum(cl != 0)
-  cov_pct <- 100 * n_clustered / length(cl)
+  cov_pct <- 100 * n_clustered / N_total
+  coverage_raw <- if (N_total > 0) n_clustered / N_total else 0
+  K <- length(unique(cl[cl != 0]))
+  penalty <- if (K == 0) 0 else (1 - log(K + 1) / log(N_total + 1))
+  coverage_eff <- coverage_raw * penalty
 
   dt_full[, cluster := cl]
   agg <- dt_full[cluster != 0 & is.finite(dx) & is.finite(dy),
@@ -1351,12 +1367,12 @@ full_eval_one <- function(city_id, eps, minPts, prepared) {
     city = city_id,
     eps = eps,
     minPts = minPts,
-    clustered_trips = n_clustered,
+    coverage_eff = coverage_eff,
     clustered_pct = cov_pct,
     dir_cohesion = dir_full,
-    n_clusters = length(unique(cl[cl != 0])),
-    noise_pct = 100 * sum(cl == 0) / length(cl),
-    n_total = length(cl)
+    n_clusters = K,
+    noise_pct = 100 * sum(cl == 0) / N_total,
+    n_total = N_total
   )
 }
 
@@ -1397,20 +1413,20 @@ if (nrow(full_validated_df) > 0) {
     ) %>%
     dplyr::slice_min(dist_ideal, n = 1, with_ties = FALSE) %>%
     dplyr::ungroup() %>%
-    dplyr::select(city, eps, minPts, clustered_trips, clustered_pct, dir_cohesion, n_clusters, noise_pct)
+    dplyr::select(city, eps, minPts, coverage_eff, clustered_pct, dir_cohesion, n_clusters, noise_pct)
 
   print(knee_full)
 
   knee_final_df <- knee_full %>%
     dplyr::mutate(config = "knee_final") %>%
     dplyr::select(city, config, eps, minPts,
-                  clustered_trips, clustered_pct,
+                  coverage_eff, clustered_pct,
                   dir_cohesion, n_clusters, noise_pct)
 
   expert_df <- expert_eval_df %>%
     dplyr::mutate(config = "expert") %>%
     dplyr::select(city, config, eps, minPts,
-                  clustered_trips, clustered_pct,
+                  coverage_eff, clustered_pct,
                   dir_cohesion, n_clusters, noise_pct)
 
   compare_df <- dplyr::bind_rows(expert_df, knee_final_df) %>%
@@ -1419,4 +1435,77 @@ if (nrow(full_validated_df) > 0) {
   print(compare_df)
 } else {
   cat("full_validated_df is empty; skipping knee_final comparison.\n")
+}
+
+############################################################
+# Step 17 — Hypervolume preprocessing inputs (minimization form)
+############################################################
+
+to_hv_min <- function(df, coverage_col = "coverage", cohesion_col = "dir_cohesion") {
+
+  df %>%
+    dplyr::transmute(
+      eps, minPts,
+      f1 = - .data[[coverage_col]],      # minimize negative coverage
+      f2 = - .data[[cohesion_col]]       # minimize negative cohesion
+    )
+}
+
+check_transform <- function(df) {
+  cat("Raw best coverage:", max(df$coverage), "\n")
+  cat("Raw best cohesion:", max(df$dir_cohesion), "\n")
+
+  hv <- to_hv_min(df)
+  cat("Min f1 (should correspond to max coverage):", min(hv$f1), "\n")
+  cat("Min f2 (should correspond to max cohesion):", min(hv$f2), "\n")
+}
+
+validate_hv_input <- function(hv_df) {
+  stopifnot(all(is.finite(hv_df$f1)), all(is.finite(hv_df$f2)))
+  invisible(TRUE)
+}
+
+make_ref <- function(hv_df, pad = 0.1) {
+  c(
+    max(hv_df$f1) + pad * abs(max(hv_df$f1)),
+    max(hv_df$f2) + pad * abs(max(hv_df$f2))
+  )
+}
+
+# Example diagnostics for Berlin (if available)
+if (!is.null(pareto_tables$berlin) && nrow(pareto_tables$berlin) > 0) {
+  hv_berlin <- to_hv_min(pareto_tables$berlin)
+  print(summary(hv_berlin))
+  check_transform(pareto_tables$berlin)
+  validate_hv_input(hv_berlin)
+  ref_berlin <- make_ref(hv_berlin)
+  print(ref_berlin)
+}
+
+hv_inputs <- list()
+hv_refs <- list()
+
+for (city_id in names(pareto_tables)) {
+  df_city <- pareto_tables[[city_id]]
+  if (is.null(df_city) || nrow(df_city) == 0) next
+
+  hv_inputs[[city_id]] <- to_hv_min(df_city)
+  validate_hv_input(hv_inputs[[city_id]])
+  hv_refs[[city_id]] <- make_ref(hv_inputs[[city_id]])
+}
+
+for (city_id in names(hv_inputs)) {
+  cat("\nCITY:", toupper(city_id), "\n")
+  print(summary(hv_inputs[[city_id]][, c("f1", "f2")]))
+  cat("ref =", hv_refs[[city_id]], "\n")
+}
+
+if (!is.null(hv_inputs$berlin) && !is.null(hv_refs$berlin)) {
+  hv <- hv_inputs$berlin
+  ref <- hv_refs$berlin
+
+  print(c(
+    ref1_ok = ref[1] > max(hv$f1),
+    ref2_ok = ref[2] > max(hv$f2)
+  ))
 }
