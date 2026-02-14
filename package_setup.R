@@ -1190,10 +1190,76 @@ for (city_id in names(prepared)) {
 }
 
 ############################################################
-# Step 15b — Compare expert vs knee table (if knee eval exists)
+# Step 15b — Build FULL knee eval table (full_eval_df)
 ############################################################
 
-if (exists("full_eval_df") && is.data.frame(full_eval_df)) {
+if (!exists("full_eval_df") || !is.data.frame(full_eval_df)) {
+  full_eval <- list()
+
+  for (city_id in names(knee_solutions)) {
+
+    knee_row <- knee_solutions[[city_id]]
+    if (is.null(knee_row) || !is.data.frame(knee_row) || nrow(knee_row) == 0) {
+      cat("Skipping FULL knee eval for", toupper(city_id), "(no knee row).\n")
+      next
+    }
+
+    eps_k <- knee_row$eps
+    min_k <- knee_row$minPts
+
+    X_full <- prepared[[city_id]]$X_scaled
+    dt_full <- prepared[[city_id]]$city_clean
+
+    # Run DBSCAN on FULL data
+    db <- dbscan(X_full, eps = eps_k, minPts = min_k)
+    cl <- db$cluster
+
+    # Coverage on full data
+    n_clustered <- sum(cl != 0)
+    cov_pct <- 100 * n_clustered / length(cl)
+
+    # Cohesion on full data
+    tmp <- data.table::as.data.table(dt_full)
+    tmp[, cluster := cl]
+    agg <- tmp[cluster != 0 & is.finite(dx) & is.finite(dy),
+               .(mean_dx = mean(dx), mean_dy = mean(dy)),
+               by = cluster]
+
+    if (nrow(agg) < 2) {
+      dir_full <- NA_real_
+    } else {
+      v <- as.matrix(agg[, .(mean_dx, mean_dy)])
+      norms <- sqrt(rowSums(v^2))
+      norms[norms == 0] <- 1
+      u <- v / norms
+      dir_full <- dir_concentration_unweighted(seq_len(nrow(u)), u)
+    }
+
+    full_eval[[city_id]] <- data.frame(
+      city = city_id,
+      eps = eps_k,
+      minPts = min_k,
+      clustered_trips = n_clustered,
+      clustered_pct = cov_pct,
+      dir_cohesion = dir_full,
+      n_total = length(cl),
+      n_clusters = length(unique(cl[cl != 0])),
+      noise_pct = 100 * sum(cl == 0) / length(cl)
+    )
+
+    cat("FULL knee eval done:", toupper(city_id), "\n")
+  }
+
+  full_eval_df <- if (length(full_eval) > 0) do.call(rbind, full_eval) else data.frame()
+}
+
+print(full_eval_df)
+
+############################################################
+# Step 15c — Compare expert vs knee table (using full_eval_df)
+############################################################
+
+if (is.data.frame(full_eval_df) && nrow(full_eval_df) > 0) {
   knee_eval_df <- full_eval_df %>%
     dplyr::mutate(config = "knee")
 
@@ -1218,7 +1284,7 @@ if (exists("full_eval_df") && is.data.frame(full_eval_df)) {
 
   print(compare_df_pretty)
 } else {
-  cat("full_eval_df not found; skipping expert vs knee comparison table.\n")
+  cat("full_eval_df empty/not available; skipping expert vs knee comparison table.\n")
 }
 
 # get unique Pareto configs (per city)
