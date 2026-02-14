@@ -1634,3 +1634,136 @@ if (exists("hv_df") && is.data.frame(hv_df) && nrow(hv_df) > 0) {
       theme_minimal()
   )
 }
+
+############################################################
+# Step 18 — Visualize final DBSCAN clusters using selected configs
+############################################################
+
+# Choose final configuration table (prefers full-data knee table)
+if (exists("knee_full") && is.data.frame(knee_full) && nrow(knee_full) > 0) {
+  knee_tbl <- knee_full
+} else if (exists("full_eval_df") && is.data.frame(full_eval_df) && nrow(full_eval_df) > 0) {
+  knee_tbl <- full_eval_df
+} else {
+  knee_tbl <- data.frame()
+}
+
+selected_params <- list()
+if (nrow(knee_tbl) > 0 && all(c("city", "eps", "minPts") %in% names(knee_tbl))) {
+  selected_params <- lapply(split(knee_tbl, knee_tbl$city), function(x) {
+    list(eps = as.numeric(x$eps[1]), minPts = as.integer(round(x$minPts[1])))
+  })
+}
+
+plot_city_clusters <- function(city_id, prepared, params,
+                               out_dir = "plots_dbscan",
+                               sample_n_points = 60000,
+                               sample_n_segments = 15000,
+                               plot_segments = TRUE,
+                               show_plots = TRUE) {
+
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  if (is.null(prepared[[city_id]])) {
+    stop("plot_city_clusters: city not found in prepared: ", city_id)
+  }
+
+  dt <- as.data.table(prepared[[city_id]]$city_clean)
+  X <- prepared[[city_id]]$X_scaled
+
+  required_cols <- c("x_o", "y_o", "x_d", "y_d")
+  if (!all(required_cols %in% names(dt))) {
+    stop("plot_city_clusters: city_clean missing required columns for ", city_id,
+         ". Need: ", paste(required_cols, collapse = ", "))
+  }
+
+  if (is.null(params) || is.null(params$eps) || is.null(params$minPts)) {
+    stop("plot_city_clusters: missing eps/minPts for city ", city_id)
+  }
+
+  db <- dbscan::dbscan(X, eps = params$eps, minPts = params$minPts)
+  dt[, cluster := db$cluster]
+
+  set.seed(1)
+  n <- nrow(dt)
+
+  idx_pts <- if (n > sample_n_points) sample.int(n, sample_n_points) else seq_len(n)
+  dt_pts <- dt[idx_pts, ]
+  dt_pts[, cluster_f := factor(cluster)]
+
+  p_orig <- ggplot(dt_pts, aes(x = x_o, y = y_o, color = cluster_f)) +
+    geom_point(size = 0.6, alpha = 0.7) +
+    coord_equal() +
+    labs(
+      title = paste0("DBSCAN clusters (origins) — ", toupper(city_id)),
+      subtitle = paste0("eps = ", params$eps, ", minPts = ", params$minPts,
+                        " | noise cluster = 0"),
+      x = "UTM Easting (m)", y = "UTM Northing (m)", color = "Cluster"
+    ) +
+    theme_minimal()
+
+  f_orig <- file.path(out_dir, paste0("origins_", city_id, "_eps", params$eps,
+                                      "_minPts", params$minPts, ".png"))
+  ggsave(f_orig, plot = p_orig, width = 8, height = 7, dpi = 200)
+
+  p_seg <- NULL
+  f_seg <- NA_character_
+
+  if (isTRUE(plot_segments)) {
+    dt_seg <- dt[cluster != 0]
+    m <- nrow(dt_seg)
+
+    if (m > 0) {
+      idx_seg <- if (m > sample_n_segments) sample.int(m, sample_n_segments) else seq_len(m)
+      dt_seg <- dt_seg[idx_seg, ]
+      dt_seg[, cluster_f := factor(cluster)]
+
+      p_seg <- ggplot(dt_seg, aes(x = x_o, y = y_o, xend = x_d, yend = y_d, color = cluster_f)) +
+        geom_segment(alpha = 0.25, linewidth = 0.3) +
+        coord_equal() +
+        labs(
+          title = paste0("DBSCAN clusters (segments) — ", toupper(city_id)),
+          subtitle = paste0("eps = ", params$eps, ", minPts = ", params$minPts,
+                            " | noise removed for clarity"),
+          x = "UTM Easting (m)", y = "UTM Northing (m)", color = "Cluster"
+        ) +
+        theme_minimal()
+
+      f_seg <- file.path(out_dir, paste0("segments_", city_id, "_eps", params$eps,
+                                         "_minPts", params$minPts, ".png"))
+      ggsave(f_seg, plot = p_seg, width = 8, height = 7, dpi = 200)
+    }
+  }
+
+  if (isTRUE(show_plots)) {
+    print(p_orig)
+    if (!is.null(p_seg)) print(p_seg)
+  }
+
+  list(
+    city_clean_with_clusters = dt,
+    p_orig = p_orig,
+    p_seg = p_seg,
+    file_orig = f_orig,
+    file_seg = f_seg
+  )
+}
+
+cluster_plots <- list()
+
+for (city_id in names(prepared)) {
+  params <- selected_params[[city_id]]
+  if (is.null(params)) {
+    cat("Skipping plotting for", toupper(city_id), "(no selected params).\n")
+    next
+  }
+
+  cat("Plotting:", toupper(city_id), "\n")
+  cluster_plots[[city_id]] <- plot_city_clusters(
+    city_id = city_id,
+    prepared = prepared,
+    params = params,
+    out_dir = "plots_dbscan",
+    show_plots = TRUE
+  )
+}
