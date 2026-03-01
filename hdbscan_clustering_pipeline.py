@@ -1,6 +1,4 @@
-"""Tidy HDBSCAN pipeline for per-city OD-flow clustering.
-For changing path, please know that datasets are loaded in line 1430
-This script refactors the notebook-style workflow into reusable functions:
+"""HDBSCAN pipeline for per-city OD-flow clustering.
 1) Load and clean OD data from RDS files.
 2) Build feature matrices and z-score scaling.
 3) Optional diagnostics (kNN-distance summaries, SNN overlap, HDBSCAN bounds).
