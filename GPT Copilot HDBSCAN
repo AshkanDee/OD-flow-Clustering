@@ -1,0 +1,2427 @@
+# ============================================================
+# Step 0 — Integrated OD-prep pipeline for Berlin + Cologne + Munich (Python)
+# Mirrors the R script structure and outputs as closely as possible.
+# ============================================================
+
+import os
+import numpy as np
+import pandas as pd
+
+# ---- RDS reader
+# pip install pyreadr
+import pyreadr
+
+# ---- CRS transform (WGS84 -> ETRS89 / UTM zone 32N EPSG:25832)
+# pip install pyproj
+from pyproj import Transformer
+
+
+# -----------------------------
+# Inputs (same as R)
+# -----------------------------
+city_files = {
+    "berlin":  "dt_bolt_berlin_06_05.rds",
+    "cologne": "dt_voi_cologne_06_05.rds",
+    "munich":  "dt_voi_munich_06_05.rds",
+}
+
+needed = ["start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat"]
+
+
+# ============================================================
+# Helper: readRDS equivalent
+# ============================================================
+def read_rds_as_df(rds_path: str) -> pd.DataFrame:
+    if not os.path.exists(rds_path):
+        raise FileNotFoundError(f"File not found: {rds_path}")
+
+    res = pyreadr.read_r(rds_path)  # dict-like: {object_name: dataframe}
+    if len(res.keys()) == 0:
+        raise ValueError(f"No objects found inside RDS: {rds_path}")
+
+    # typically only one object stored
+    obj = next(iter(res.values()))
+    if not isinstance(obj, pd.DataFrame):
+        # pyreadr can return other types, but for this project we expect a data.frame/data.table
+        raise TypeError(f"Expected a data.frame in {rds_path}, got: {type(obj)}")
+
+    return obj
+
+
+# ============================================================
+# Step 0 function: prep_city_od
+# ============================================================
+def prep_city_od(
+    rds_path: str,
+    needed_cols=("start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat"),
+    crs_in: int = 4326,
+    crs_out: int = 25832,
+    drop_zero_len: bool = True
+):
+    """
+    Python mirror of your R prep_city_od():
+    - read .rds
+    - check columns
+    - drop NA
+    - range filter lat/lon
+    - transform to EPSG:25832 and add x_o,y_o,x_d,y_d
+    - compute dx, dy, angle, len
+    - optionally drop zero-length trips
+    - return {"data": df, "info": info_dict}
+    """
+
+    dt = read_rds_as_df(rds_path).copy()
+
+    # Column presence check
+    missing = [c for c in needed_cols if c not in dt.columns]
+    if missing:
+        raise ValueError(f"Missing columns in {rds_path}: {', '.join(missing)}")
+
+    n_before = len(dt)
+
+    # Drop NA rows (same condition as R)
+    dt = dt.dropna(subset=list(needed_cols))
+    n_after_na = len(dt)
+
+    # Range filter (same as R)
+    dt = dt[
+        (dt["start_loc_lat"].between(-90, 90)) &
+        (dt["dest_loc_lat"].between(-90, 90)) &
+        (dt["start_loc_lon"].between(-180, 180)) &
+        (dt["dest_loc_lon"].between(-180, 180))
+    ].copy()
+    n_after_range = len(dt)
+
+    # CRS transform: WGS84 lon/lat -> EPSG:25832 meters
+    transformer = Transformer.from_crs(f"EPSG:{crs_in}", f"EPSG:{crs_out}", always_xy=True)
+
+    # Origin XY
+    x_o, y_o = transformer.transform(dt["start_loc_lon"].to_numpy(), dt["start_loc_lat"].to_numpy())
+    # Destination XY
+    x_d, y_d = transformer.transform(dt["dest_loc_lon"].to_numpy(), dt["dest_loc_lat"].to_numpy())
+
+    dt["x_o"] = x_o
+    dt["y_o"] = y_o
+    dt["x_d"] = x_d
+    dt["y_d"] = y_d
+
+    # dx, dy, angle, len (same formulas)
+    dt["dx"] = dt["x_d"] - dt["x_o"]
+    dt["dy"] = dt["y_d"] - dt["y_o"]
+    dt["angle"] = np.arctan2(dt["dy"].to_numpy(), dt["dx"].to_numpy())
+    dt["len"] = np.sqrt(dt["dx"].to_numpy()**2 + dt["dy"].to_numpy()**2)
+
+    n_zero_len = int((dt["len"] == 0).sum())
+
+    if drop_zero_len:
+        dt = dt[dt["len"] > 0].copy()
+
+    n_after_zero = len(dt)
+
+    info = {
+        "file": rds_path,
+        "n_before": n_before,
+        "n_after_na": n_after_na,
+        "n_after_range": n_after_range,
+        "n_zero_len": n_zero_len,
+        "n_after_zero": n_after_zero,
+    }
+
+    return {"data": dt, "info": info}
+
+
+# ============================================================
+# Step 0 run: prepared = lapply(city_files, prep_city_od, ...)
+# ============================================================
+prepared = {city: prep_city_od(path, needed_cols=needed, drop_zero_len=True)
+            for city, path in city_files.items()}
+
+# cleaning_summary equivalent
+cleaning_summary = pd.DataFrame([
+    {
+        "city": city,
+        "file": prepared[city]["info"]["file"],
+        "n_before": prepared[city]["info"]["n_before"],
+        "n_after_na": prepared[city]["info"]["n_after_na"],
+        "n_after_range": prepared[city]["info"]["n_after_range"],
+        "zero_len_trips": prepared[city]["info"]["n_zero_len"],
+        "n_after_zero_len_removed": prepared[city]["info"]["n_after_zero"],
+    }
+    for city in prepared.keys()
+])
+
+print(cleaning_summary)
+
+berlin  = prepared["berlin"]["data"]
+cologne = prepared["cologne"]["data"]
+munich  = prepared["munich"]["data"]
+
+print("\nZero-length remaining (should be 0):")
+print("Berlin :", int((berlin["len"] == 0).sum()))
+print("Cologne:", int((cologne["len"] == 0).sum()))
+print("Munich :", int((munich["len"] == 0).sum()))
+
+
+# ============================================================
+# Step 1 — Load + inspect all cities (no combining)
+# BRIDGE: build city_data from Step 0 output (prepared)
+# ============================================================
+
+# stable pointer because Step 2 will reassign `prepared`
+prepared_od = prepared
+
+# Store each city separately (no combining) — SAME OBJECT NAME: city_data
+city_data = {}
+for city_id in prepared_od.keys():
+    dt = prepared_od[city_id]["data"].copy()
+    if "city" not in dt.columns:
+        dt["city"] = city_id  # traceability tag
+    city_data[city_id] = dt
+
+# Print inspection for each city (mirrors your loop)
+for city_id, dt in city_data.items():
+    print("\n=============================")
+    print("CITY:", city_id.upper())
+    print("=============================")
+
+    print("class():")
+    print(type(dt))
+
+    print("\ndim():")
+    print(dt.shape)
+
+    print("\nnames():")
+    print(list(dt.columns))
+
+
+# ============================================================
+# Step 2 — Structural correction + scaling (per city)
+# ============================================================
+
+def make_X_and_clean(city_df: pd.DataFrame, feature_cols=("x_o", "y_o", "dx", "dy")):
+    """
+    Mirror of R make_X_and_clean():
+    - build X from feature cols
+    - ok = complete cases
+    - X_scaled = scale(X[ok,])
+    - city_clean = city_df[ok,]
+    """
+
+    missing = [c for c in feature_cols if c not in city_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+    X = city_df.loc[:, feature_cols].to_numpy()
+
+    # complete.cases equivalent
+    ok = np.isfinite(X).all(axis=1)
+
+    X_ok = X[ok, :]
+    # scale() equivalent: (x - mean) / sd, columnwise with ddof=1 (R uses sample sd)
+    mu = X_ok.mean(axis=0)
+    sd = X_ok.std(axis=0, ddof=1)
+    # avoid divide-by-zero if any feature constant
+    sd_safe = np.where(sd == 0, 1.0, sd)
+    X_scaled = (X_ok - mu) / sd_safe
+
+    city_clean = city_df.loc[ok, :].copy()
+
+    return {"X": X_ok, "ok": ok, "X_scaled": X_scaled, "city_clean": city_clean}
+
+
+# Run for all cities (no combining) — SAME OBJECT NAME: prepared (Step 2 output)
+prepared = {}
+for city_id in city_data.keys():
+    res = make_X_and_clean(city_data[city_id], feature_cols=("x_o", "y_o", "dx", "dy"))
+    res["city_id"] = city_id
+    prepared[city_id] = res
+
+N_total_by_city = {city_id: prepared[city_id]["X"].shape[0] for city_id in prepared.keys()}
+print(N_total_by_city)
+
+berlin_clean  = prepared["berlin"]["city_clean"]
+munich_clean  = prepared["munich"]["city_clean"]
+cologne_clean = prepared["cologne"]["city_clean"]
+
+X_scaled_berlin  = prepared["berlin"]["X_scaled"]
+X_scaled_munich  = prepared["munich"]["X_scaled"]
+X_scaled_cologne = prepared["cologne"]["X_scaled"]
+
+for city_id in prepared.keys():
+    print(f"\n--- {city_id.upper()} ---")
+    print("Rows original:", len(city_data[city_id]))
+    print("Rows kept:",     len(prepared[city_id]["city_clean"]))
+    print("Rows dropped:",  int((~prepared[city_id]["ok"]).sum()))
+    print("X_scaled dim:",  f"{prepared[city_id]['X_scaled'].shape[0]} x {prepared[city_id]['X_scaled'].shape[1]}")
+
+# ------------------------------------------------------------
+# Search-space justification diagnostics (run after `prepared`) [PY/Colab]
+#
+# Mirrors your R diagnostics:
+# 1) kNN distance summaries (DBSCAN-style eps intuition)  [optional but useful]
+# 2) SNN shared-neighbor overlap diagnostics              [optional]
+# 3) HDBSCAN bounds justification (min_cluster_size from fraction rule on subsample)
+#
+# Note: for HDBSCAN you typically do NOT need eps, but kNN curves are still a nice
+# sanity check for "local density scale" and for explaining search-space choices.
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+from sklearn.neighbors import NearestNeighbors
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Preconditions
+# -----------------------------
+if "prepared" not in globals() or not isinstance(prepared, dict) or len(prepared) == 0:
+    raise ValueError("Object `prepared` not found or not a non-empty dict. Run data preparation first.")
+
+for city_id in prepared.keys():
+    if prepared[city_id].get("X_scaled", None) is None:
+        raise ValueError(f"Missing X_scaled for city: {city_id}")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def knee_elbow(d_sorted: np.ndarray):
+    """
+    R version returns the distance value at max perpendicular distance
+    to the line from first to last point (classic knee on sorted curve).
+    """
+    d = np.asarray(d_sorted, dtype=float)
+    n = d.size
+    if n < 10:
+        return np.nan
+
+    x = np.arange(1, n + 1, dtype=float)  # 1..n like R
+    x1, y1 = 1.0, d[0]
+    x2, y2 = float(n), d[-1]
+
+    num = np.abs((y2 - y1) * x - (x2 - x1) * d + x2 * y1 - y2 * x1)
+    den = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2)
+    dist = num / den
+
+    return d[int(np.argmax(dist))]
+
+def knn_distances(X_scaled: np.ndarray, k: int):
+    """
+    Returns vector of kNN distances (distance to kth neighbor) for each point.
+    Matches dbscan::kNNdist(X_scaled, k=k) conceptually.
+    """
+    # We ask for k+1 because the closest neighbor is the point itself (distance 0).
+    nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm="auto", metric="euclidean")
+    nbrs.fit(X_scaled)
+    dists, _ = nbrs.kneighbors(X_scaled, return_distance=True)
+    # kth neighbor distance: index k (0=self, 1=1st neighbor, ..., k=kth neighbor)
+    return dists[:, k]
+
+def knn_summary_one(X_scaled: np.ndarray, k: int,
+                    q=(0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)):
+    d = knn_distances(X_scaled, k=k)
+    ds = np.sort(d)
+
+    out = {
+        "k": k,
+        "n": int(d.size),
+        "elbow_eps": float(knee_elbow(ds)),
+    }
+
+    qs = np.quantile(d, q=q)
+    for p, val in zip(q, qs):
+        out[f"q{int(round(p*100)):02d}"] = float(val)
+
+    return out
+
+def snn_sharednn_diagnostics(X_scaled: np.ndarray, k: int = 30,
+                            n_probe: int = 4000, seed: int = 1):
+    """
+    Roughly reproduces your R approach:
+    - sample up to n_probe points
+    - compute kNN ids for all points
+    - repeatedly sample pairs inside probe and compute shared neighbor counts
+    """
+    rng = np.random.default_rng(seed)
+    n = X_scaled.shape[0]
+    idx = rng.choice(n, size=min(n, n_probe), replace=False)
+
+    nbrs = NearestNeighbors(n_neighbors=k + 1, metric="euclidean").fit(X_scaled)
+    _, ids = nbrs.kneighbors(X_scaled, return_distance=True)
+    # drop self neighbor
+    ids = ids[:, 1:(k + 1)]
+
+    # neighbor lists for probe indices
+    nn_list = [set(ids[i, :].tolist()) for i in idx]
+
+    m = len(nn_list)
+    checks = min(8000, m * 2)
+
+    shared_counts = np.empty(checks, dtype=int)
+    for t in range(checks):
+        a = rng.integers(0, m)
+        b = rng.integers(0, m)
+        shared_counts[t] = len(nn_list[a].intersection(nn_list[b]))
+
+    return {
+        "k": int(k),
+        "probe_n": int(m),
+        "shared_mean": float(shared_counts.mean()),
+        "shared_median": float(np.median(shared_counts)),
+        "shared_q90": float(np.quantile(shared_counts, 0.90)),
+        "shared_q95": float(np.quantile(shared_counts, 0.95)),
+        "shared_q99": float(np.quantile(shared_counts, 0.99)),
+    }
+
+def hdbscan_mcs_candidates(N_eff: int, n: int = 14, frac_min: float = 0.005, frac_max: float = 0.10):
+    """
+    Same as your R:
+    - compute min_cluster_size candidates as log-spaced ints
+      between frac_min*N_eff and frac_max*N_eff
+    """
+    lo = max(10, int(round(frac_min * N_eff)))
+    hi = max(lo + 1, int(round(frac_max * N_eff)))
+
+    vals = np.unique(np.round(np.exp(np.linspace(np.log(lo), np.log(hi), num=n))).astype(int))
+    return np.sort(vals)
+
+# -----------------------------
+# Config (same intent as R)
+# -----------------------------
+k_values_dbscan = [10, 20, 30, 50]
+
+k_allowed_snn = [15, 20, 25, 30, 35]
+n_probe_snn = 4000
+
+min_samples_allowed_hdb = [10, 15, 20, 25, 30, 35, 40, 50, 60]
+
+# -----------------------------
+# 1) kNN distance summaries (DBSCAN-style eps intuition)
+# -----------------------------
+knn_tables = {}
+eps_reco_rows = []
+
+for city_id in prepared.keys():
+    X_scaled = prepared[city_id]["X_scaled"]
+
+    rows = [knn_summary_one(X_scaled, k=k) for k in k_values_dbscan]
+    df_city = pd.DataFrame(rows)
+    df_city.insert(0, "city", city_id)
+    knn_tables[city_id] = df_city
+
+    # Reco: eps bounds from quantiles + median elbow
+    eps_min = float(df_city["q05"].min())
+    eps_max = float(df_city["q99"].max())
+    elbow_med = float(df_city["elbow_eps"].median())
+
+    eps_reco_rows.append({
+        "city": city_id,
+        "eps_min_q05": eps_min,
+        "eps_max_q99": eps_max,
+        "elbow_median": elbow_med
+    })
+
+knn_df = pd.concat(knn_tables.values(), ignore_index=True)
+eps_reco_df = pd.DataFrame(eps_reco_rows)
+
+print("\n=== kNN distance summaries (per city, per k) ===")
+display(knn_df)
+
+print("\n=== Recommended eps bounds from kNN distances (for intuition / reporting) ===")
+display(eps_reco_df)
+
+def plot_knn_curves(city_id: str, k_values=k_values_dbscan, max_points=None):
+    """
+    Similar to your ggplot curve: sorted kNN distances.
+    Use max_points to thin plotting for huge datasets (optional).
+    """
+    X_scaled = prepared[city_id]["X_scaled"]
+    n = X_scaled.shape[0]
+
+    if max_points is not None and n > max_points:
+        # random subsample for plotting only (keeps curve shape roughly)
+        rng = np.random.default_rng(1)
+        idx = rng.choice(n, size=max_points, replace=False)
+        Xp = X_scaled[idx, :]
+    else:
+        Xp = X_scaled
+
+    plt.figure()
+    for k in k_values:
+        d = np.sort(knn_distances(Xp, k=k))
+        plt.plot(np.arange(1, d.size + 1), d, label=f"k={k}", alpha=0.85)
+    plt.title(f"kNN-distance curves — {city_id.upper()}")
+    plt.xlabel("Points sorted by distance")
+    plt.ylabel("kNN distance")
+    plt.legend()
+    plt.show()
+
+# Example:
+# plot_knn_curves("berlin", max_points=50000)
+
+# -----------------------------
+# 2) SNN shared-neighbor overlap diagnostics (optional)
+# -----------------------------
+snn_rows = []
+for city_id in prepared.keys():
+    X_scaled = prepared[city_id]["X_scaled"]
+    for k in k_allowed_snn:
+        d = snn_sharednn_diagnostics(X_scaled, k=k, n_probe=n_probe_snn, seed=1)
+        d["city"] = city_id
+        snn_rows.append(d)
+
+snn_diag_df = pd.DataFrame(snn_rows)
+cols_order = ["city"] + [c for c in snn_diag_df.columns if c != "city"]
+snn_diag_df = snn_diag_df.loc[:, cols_order]
+
+print("\n=== SNN shared-neighbor diagnostics (probe sample) ===")
+display(snn_diag_df)
+
+print("\nInterpretation guide:")
+print("- eps_snn should not be near 0 (over-connect) or near k (over-fragment).")
+print("- shared_q90/shared_q95 suggest where meaningful overlap begins per city.")
+
+# -----------------------------
+# 3) HDBSCAN bounds justification (from N_SUB used in optimization)
+# -----------------------------
+N_SUB = 10_000
+mcs_vals = hdbscan_mcs_candidates(N_eff=N_SUB, n=14, frac_min=0.005, frac_max=0.10)
+
+hdb_bounds_df = pd.DataFrame([{
+    "N_eff": N_SUB,
+    "frac_min": 0.005,
+    "frac_max": 0.10,
+    "mcs_min": int(mcs_vals.min()),
+    "mcs_max": int(mcs_vals.max()),
+    "mcs_values": ", ".join(map(str, mcs_vals.tolist())),
+    "min_samples_allowed": ", ".join(map(str, min_samples_allowed_hdb))
+}])
+
+print("\n=== HDBSCAN search-space implied by fraction rule (on subsample) ===")
+display(hdb_bounds_df)
+
+# -----------------------------
+# 4) Optional export (CSV)
+# -----------------------------
+# knn_df.to_csv("knn_distance_summaries.csv", index=False)
+# eps_reco_df.to_csv("dbscan_eps_recommendations.csv", index=False)
+# snn_diag_df.to_csv("snn_sharednn_diagnostics.csv", index=False)
+# hdb_bounds_df.to_csv("hdbscan_bounds_summary.csv", index=False)
+
+############################################################
+# Step 3 — kNN-distance plot configuration (diagnostic)
+#
+# WHY this step:
+# - kNN-distance plots help visually assess a reasonable distance scale
+#   (eps-like intuition) for density-based clustering.
+# - We inspect multiple k values to understand sensitivity.
+#
+# IMPORTANT:
+# - Diagnostic only (not optimization yet).
+# - k aligns with minPts/min_cluster_size ideas later for interpretability.
+############################################################
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neighbors import NearestNeighbors
+
+# Chosen k values (same across all cities)
+k_values = [10, 20, 30, 50]
+
+############################################################
+# Step 3b — kNN-distance plots (per city)
+############################################################
+
+# SAFETY analogue to saving/restoring par(): we create/close figures per city
+for city_id in prepared.keys():
+    X_scaled = prepared[city_id]["X_scaled"]
+
+    print(f"\nPlotting kNN-distance curves for: {city_id.upper()}")
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    axes = axes.ravel()
+
+    for ax, k in zip(axes, k_values):
+        # Equivalent of dbscan::kNNdist(X_scaled, k=k):
+        # distance to k-th nearest neighbor (excluding self)
+        nn = NearestNeighbors(n_neighbors=k + 1, algorithm="auto")
+        nn.fit(X_scaled)
+        distances, _ = nn.kneighbors(X_scaled)  # distances[:, 0] is self (0.0)
+
+        kth_dist = distances[:, k]              # distance to k-th neighbor
+        kth_sorted = np.sort(kth_dist)
+
+        ax.plot(kth_sorted)
+        ax.set_xlabel("Points sorted by distance")
+        ax.set_ylabel(f"{k}-NN distance")
+        ax.set_title(f"{city_id} | kNN distance (k = {k})")
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+# Restore original graphics settings (Python analogue)
+# In matplotlib, figures/axes are self-contained, so the safe equivalent
+# is simply to reset rcParams to defaults if they were modified.
+
+import matplotlib as mpl
+
+mpl.rcParams.update(mpl.rcParamsDefault)
+# ------------------------------------------------------------
+# Step 4 — HDBSCAN parameter grid (R-faithful)
+#
+# WHY:
+# - Your R workflow swept only minPts for HDBSCAN
+# - In python-hdbscan, the closest equivalent is min_samples
+# - min_cluster_size is held fixed to keep the same 1-parameter tuning logic
+# ------------------------------------------------------------
+
+# == minPts candidates (used as min_samples in python-hdbscan)
+k_grid = [20, 25, 30, 35, 40, 45, 50, 60, 70]
+
+# Keep for compatibility with DBSCAN pipeline objects (NOT used in HDBSCAN fitting)
+# (Useful if your shared code prints eps range summaries)
+eps_grid = np.arange(0.08, 0.40 + 1e-9, 0.02)
+
+# Fixed (not swept) to keep your R logic unchanged
+MIN_CLUSTER_SIZE_FIXED = 20
+
+print("HDBSCAN grid:")
+print("  min_samples candidates:", k_grid)
+print("  min_cluster_size fixed:", MIN_CLUSTER_SIZE_FIXED)
+print("  eps_grid (compat only):", (round(float(eps_grid.min()), 2),
+                                  round(float(eps_grid.max()), 2),
+                                  len(eps_grid)))
+# ------------------------------------------------------------
+# Step 5 — Initialize results container (HDBSCAN / Python)
+# WHY: collect clustering outputs across cities and parameters
+# ------------------------------------------------------------
+
+results_hdbscan = []
+idx_hdbscan = 1
+
+# ------------------------------------------------------------
+# Helper — direction head (prefer columns in X_scaled / X)
+# Mirrors your R get_dir_head() logic
+# ------------------------------------------------------------
+
+def get_dir_head(prep_city, n=6):
+    """
+    Try to find direction vectors in:
+    1) X_scaled columns (if stored as DataFrame with column names)
+    2) X columns (if stored as DataFrame with column names)
+    3) city_clean columns
+    Returns a small DataFrame head or None.
+    """
+
+    # 1) X_scaled (only if it's a DataFrame with column names)
+    Xs = prep_city.get("X_scaled", None)
+    if isinstance(Xs, pd.DataFrame):
+        cn = list(Xs.columns)
+        if all(c in cn for c in ["dx", "dy"]):
+            return Xs.loc[:, ["dx", "dy"]].head(n)
+        if all(c in cn for c in ["ux", "uy"]):
+            return Xs.loc[:, ["ux", "uy"]].head(n)
+
+    # 2) X (only if it's a DataFrame with column names)
+    X = prep_city.get("X", None)
+    if isinstance(X, pd.DataFrame):
+        cn = list(X.columns)
+        if all(c in cn for c in ["dx", "dy"]):
+            return X.loc[:, ["dx", "dy"]].head(n)
+        if all(c in cn for c in ["ux", "uy"]):
+            return X.loc[:, ["ux", "uy"]].head(n)
+
+    # 3) city_clean (most likely place in your pipeline)
+    df = prep_city.get("city_clean", None)
+    if isinstance(df, pd.DataFrame):
+        cn = list(df.columns)
+        if all(c in cn for c in ["ux", "uy"]):
+            return df.loc[:, ["ux", "uy"]].head(n)
+        if all(c in cn for c in ["dx", "dy"]):
+            return df.loc[:, ["dx", "dy"]].head(n)
+
+    return None
+
+# ------------------------------------------------------------
+# Step 5a — Sanity checks / debugging prints (HDBSCAN)
+# ------------------------------------------------------------
+
+print("\n[HDBSCAN] idx =", idx_hdbscan, "\n")
+
+print("[HDBSCAN] Parameter grids / references:")
+# Step 3 diagnostic k’s (if you defined them)
+try:
+    print("k_values (diagnostic):", k_values)
+except NameError:
+    print("k_values (diagnostic): (not defined)")
+
+# HDBSCAN sweep grid (this is the one that matters)
+try:
+    print("k_grid (min_samples candidates):", k_grid)
+except NameError:
+    print("k_grid: (not defined)")
+
+# eps_grid exists for compatibility only (not used)
+try:
+    print("eps_grid (compat only):", (float(np.min(eps_grid)), float(np.max(eps_grid)), len(eps_grid)))
+except Exception:
+    print("eps_grid (compat only): (not defined)")
+
+# fixed parameter
+try:
+    print("MIN_CLUSTER_SIZE_FIXED:", MIN_CLUSTER_SIZE_FIXED)
+except NameError:
+    print("MIN_CLUSTER_SIZE_FIXED: (not defined)")
+
+print("\n[HDBSCAN] results_hdbscan length =", len(results_hdbscan), "\n")
+
+# Enforce X_scaled exists per city + show heads
+for city_id in prepared.keys():
+    print(f"\n--- {city_id.upper()} ---")
+
+    if prepared[city_id].get("X_scaled", None) is None:
+        raise ValueError(f"[HDBSCAN] Missing X_scaled for city: {city_id}")
+
+    Xs = prepared[city_id]["X_scaled"]
+    print("X_scaled dims:", Xs.shape)
+
+    # Print a small head (numpy array)
+    print("X_scaled head:")
+    print(Xs[:6, :])
+
+    # Direction head if available
+    dir_head = get_dir_head(prepared[city_id], n=6)
+    if dir_head is not None:
+        print("Direction head:")
+        display(dir_head)
+    else:
+        print("WARNING: direction vectors not found (dx/dy or ux/uy missing).")
+# ------------------------------------------------------------
+# Step 6 — HDBSCAN grid search (FULL DATA, X_scaled) [FINAL]
+#
+# WHY:
+# - Evaluate clustering structure across min_samples (R-faithful "minPts sweep")
+# - Do NOT loop eps (HDBSCAN has no eps)
+#
+# Notes:
+# - noise label = -1
+# - Keep columns compatible with DBSCAN grid output:
+#     minPts exists, eps exists (NaN), plus n_clusters/noise_pct/max_cluster_pct
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+import hdbscan
+
+results_hdbscan = []
+idx_hdbscan = 1  # parity with R pipeline (optional)
+
+# Fixed to avoid changing your R-logic
+# (You already defined this in Step 4; kept here for safety)
+MIN_CLUSTER_SIZE_FIXED = int(MIN_CLUSTER_SIZE_FIXED)
+
+# Optional: keep HDBSCAN selection method explicit for reproducibility
+CLUSTER_SELECTION_METHOD = "eom"  # default; "leaf" yields more/smaller clusters
+
+for city_id in prepared.keys():
+
+    if prepared[city_id].get("X_scaled", None) is None:
+        raise ValueError(f"[HDBSCAN] Missing X_scaled for city: {city_id}")
+
+    X_scaled = prepared[city_id]["X_scaled"]
+    n_total = int(X_scaled.shape[0])
+
+    for k in k_grid:
+        k = int(k)
+
+        clusterer = hdbscan.HDBSCAN(
+            min_samples=k,                          # analogue of R's minPts sweep
+            min_cluster_size=MIN_CLUSTER_SIZE_FIXED, # fixed
+            metric="euclidean",
+            cluster_selection_method=CLUSTER_SELECTION_METHOD,
+            core_dist_n_jobs=1                       # Colab-friendly; increase if you have RAM/CPU
+        )
+
+        cl = clusterer.fit_predict(X_scaled)         # noise = -1
+
+        n_noise = int((cl == -1).sum())
+        noise_pct = 100.0 * n_noise / len(cl)
+
+        labels_nonnoise = cl[cl != -1]
+        n_clusters = int(np.unique(labels_nonnoise).size) if labels_nonnoise.size > 0 else 0
+
+        if n_clusters > 0:
+            _, counts = np.unique(labels_nonnoise, return_counts=True)
+            max_cluster_size = int(counts.max())
+            max_cluster_pct = 100.0 * max_cluster_size / len(cl)
+        else:
+            max_cluster_pct = 0.0
+
+        # Optional: average membership probability among non-noise points
+        # (Can help interpret "confidence" across k)
+        if hasattr(clusterer, "probabilities_") and clusterer.probabilities_ is not None:
+            probs = clusterer.probabilities_
+            mean_prob_nonnoise = float(probs[cl != -1].mean()) if (cl != -1).any() else np.nan
+        else:
+            mean_prob_nonnoise = np.nan
+
+        results_hdbscan.append({
+            "city": city_id,
+            "algorithm": "HDBSCAN",
+            "minPts": k,                              # keep name for compatibility
+            "eps": np.nan,                            # schema compatibility only
+            "n_clusters": n_clusters,
+            "noise_pct": noise_pct,
+            "max_cluster_pct": max_cluster_pct,
+            "n_total": n_total,
+            "n_used": n_total,                        # FULL DATA like DBSCAN block
+            "min_cluster_size": MIN_CLUSTER_SIZE_FIXED,
+            "cluster_selection_method": CLUSTER_SELECTION_METHOD,
+            "mean_prob_nonnoise": mean_prob_nonnoise
+        })
+
+        idx_hdbscan += 1
+
+grid_df_hdbscan = pd.DataFrame(results_hdbscan)
+print(grid_df_hdbscan)
+# ------------------------------------------------------------
+# Step 7 — Final HDBSCAN parameters (per city) [FINAL]
+# Logic preserved:
+# - per-city fixed minPts (mapped to min_samples)
+# - min_cluster_size fixed (same as your R-faithful setup)
+# - eps not used (kept only for schema compatibility elsewhere)
+# ------------------------------------------------------------
+
+import numpy as np
+import hdbscan
+
+# Per-city chosen "minPts" (R meaning) -> Python HDBSCAN min_samples
+hdbscan_params = {
+    "berlin":  {"minPts": 50},
+    "munich":  {"minPts": 45},
+    "cologne": {"minPts": 50},
+}
+
+MIN_CLUSTER_SIZE_FIXED = int(MIN_CLUSTER_SIZE_FIXED)
+CLUSTER_SELECTION_METHOD = "eom"   # keep explicit for reproducibility
+
+# ------------------------------------------------------------
+# Step 7a — Final HDBSCAN run (all cities) — X_scaled only
+# ------------------------------------------------------------
+
+for city_id in prepared.keys():
+
+    if prepared[city_id].get("X_scaled", None) is None:
+        raise ValueError(f"[HDBSCAN] Missing X_scaled for city: {city_id}")
+    if prepared[city_id].get("city_clean", None) is None:
+        raise ValueError(f"[HDBSCAN] Missing city_clean for city: {city_id}")
+
+    X_scaled = prepared[city_id]["X_scaled"]
+    city_tbl = prepared[city_id]["city_clean"]
+    assert X_scaled.shape[0] == city_tbl.shape[0]
+
+    params = hdbscan_params[city_id]
+    minPts = int(params["minPts"])
+
+    clusterer_final = hdbscan.HDBSCAN(
+        min_samples=minPts,
+        min_cluster_size=MIN_CLUSTER_SIZE_FIXED,
+        metric="euclidean",
+        cluster_selection_method=CLUSTER_SELECTION_METHOD,
+        core_dist_n_jobs=1  # Colab RAM-friendly
+    )
+
+    labels = clusterer_final.fit_predict(X_scaled)  # noise = -1
+
+    # Shift to DBSCAN-style labels:
+    # noise -1 -> 0, clusters 0.. -> 1..
+    labels_dbscan_style = np.where(labels == -1, 0, labels + 1)
+
+    # Attach to city table (like your R stopifnot logic)
+    prepared[city_id]["city_clean"] = city_tbl.copy()
+    prepared[city_id]["city_clean"]["cluster"] = labels_dbscan_style
+
+    # Reporting (match DBSCAN log)
+    n_clusters = int(np.unique(labels_dbscan_style[labels_dbscan_style != 0]).size)
+    noise_pct = 100.0 * float((labels_dbscan_style == 0).mean())
+
+    print(
+        "HDBSCAN done |", city_id,
+        "| minPts(min_samples) =", minPts,
+        "| min_cluster_size =", MIN_CLUSTER_SIZE_FIXED,
+        "| clusters =", n_clusters,
+        "| noise% =", round(noise_pct, 2)
+    )
+# ------------------------------------------------------------
+# Step 8 — Verify final clustering (cluster size check) [UPDATED]
+# WHY:
+# - Confirm cluster labels were attached correctly (incl. noise=0)
+# - Inspect size distribution (catch 1 giant cluster / too much noise / many tiny clusters)
+# ------------------------------------------------------------
+
+import numpy as np
+
+for city_id in prepared.keys():
+    print(f"\n--- {city_id.upper()} ---")
+
+    if "city_clean" not in prepared[city_id] or prepared[city_id]["city_clean"] is None:
+        raise ValueError(f"[Step 8] Missing city_clean for city: {city_id}")
+
+    df = prepared[city_id]["city_clean"]
+
+    if "cluster" not in df.columns:
+        raise ValueError(f"[Step 8] Missing `cluster` column for city: {city_id}")
+
+    cl = df["cluster"]
+
+    # Cluster counts (includes noise=0 if you used DBSCAN-style mapping)
+    cl_counts = cl.value_counts(dropna=False).sort_index()
+
+    # Print first clusters (including noise=0)
+    print("Cluster size table (first 65 labels):")
+    print(cl_counts.head(65))
+
+    # Summary stats (DBSCAN-style: noise==0)
+    n_total = int(len(cl))
+    n_noise = int((cl == 0).sum())
+    noise_pct = 100.0 * n_noise / n_total
+
+    n_clusters = int(cl[cl != 0].nunique())
+    max_cluster_size = int(cl_counts.drop(index=0, errors="ignore").max()) if n_clusters > 0 else 0
+    max_cluster_pct = 100.0 * max_cluster_size / n_total if n_clusters > 0 else 0.0
+
+    print("\nSummary:")
+    print("  n_total:", n_total)
+    print("  n_clusters (excl. noise):", n_clusters)
+    print("  noise_count:", n_noise, "| noise%:", round(noise_pct, 2))
+    print("  max_cluster_pct:", round(max_cluster_pct, 2))
+
+    # Quick warning flags (helps catch issues early)
+    if noise_pct > 90:
+        print("  WARNING: Very high noise (>90%).")
+    if n_clusters == 0:
+        print("  WARNING: No clusters found (all noise).")
+    if max_cluster_pct > 60:
+        print("  WARNING: One cluster dominates (>60% of all points).")
+# ------------------------------------------------------------
+# Step 9 — Cluster summary (size + means) [HDBSCAN, Python] UPDATED
+# Assumes: prepared[city_id]["city_clean"]["cluster"] is DBSCAN-style:
+#   - noise = 0
+#   - clusters = 1..K
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+cluster_summaries = {}
+
+for city_id in prepared.keys():
+
+    city_dt = prepared[city_id]["city_clean"].copy()
+
+    if "cluster" not in city_dt.columns:
+        raise ValueError(f"[Step 9] Missing cluster column for city: {city_id}")
+
+    # Optional fields
+    has_len = "len" in city_dt.columns
+    has_duration = "duration" in city_dt.columns
+
+    # Ensure required numeric columns exist (mean_x_o, etc.)
+    required_cols = ["x_o", "y_o"]
+    missing_req = [c for c in required_cols if c not in city_dt.columns]
+    if missing_req:
+        raise ValueError(f"[Step 9] Missing required columns for {city_id}: {missing_req}")
+
+    # dx/dy might not exist in your city_clean (depends on source)
+    has_dx = "dx" in city_dt.columns
+    has_dy = "dy" in city_dt.columns
+
+    # Exclude noise (DBSCAN-style mapping => noise label = 0)
+    df = city_dt.loc[city_dt["cluster"] != 0].copy()
+
+    if df.shape[0] == 0:
+        print(f"\n--- {city_id.upper()} ---")
+        print("WARNING: No non-noise points (all noise). Skipping summary.")
+        cluster_summaries[city_id] = pd.DataFrame()
+        continue
+
+    # Aggregations
+    agg = {
+        "size": ("cluster", "size"),
+        "mean_x_o": ("x_o", "mean"),
+        "mean_y_o": ("y_o", "mean"),
+    }
+
+    if has_dx and has_dy:
+        agg["mean_dx"] = ("dx", "mean")
+        agg["mean_dy"] = ("dy", "mean")
+    else:
+        # We'll add NaN columns after aggregation for shape consistency
+        pass
+
+    if has_len:
+        agg["mean_len"] = ("len", "mean")
+
+    if has_duration:
+        agg["mean_duration"] = ("duration", "mean")
+
+    cluster_summary = (
+        df.groupby("cluster", as_index=False)
+          .agg(**agg)
+          .sort_values("size", ascending=False)
+          .reset_index(drop=True)
+    )
+
+    # Add missing optional columns as NaN for consistent schema
+    if not (has_dx and has_dy):
+        cluster_summary["mean_dx"] = np.nan
+        cluster_summary["mean_dy"] = np.nan
+    if not has_len:
+        cluster_summary["mean_len"] = np.nan
+    if not has_duration:
+        cluster_summary["mean_duration"] = np.nan
+
+    cluster_summaries[city_id] = cluster_summary
+
+    print(f"\n--- {city_id.upper()} ---")
+    notes = []
+    if not (has_dx and has_dy):
+        notes.append("dx/dy missing")
+    if not has_len:
+        notes.append("len missing")
+    if not has_duration:
+        notes.append("duration missing")
+    if notes:
+        print("Note:", "; ".join(notes), "→ filled with NA where needed.")
+    print(cluster_summary.head(15))
+# ------------------------------------------------------------
+# Step 10 — Analyze dominant cluster (but do NOT exclude) [UPDATED]
+# Uses DBSCAN-style labels:
+#   - noise = 0
+#   - clusters = 1..K
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+moo_clusters = {}
+
+for city_id in prepared.keys():
+
+    # Cluster summary table from Step 9 (may be empty if all noise)
+    cs = cluster_summaries.get(city_id, None)
+
+    if isinstance(cs, pd.DataFrame) and (len(cs) > 0) and ("size" in cs.columns) and ("cluster" in cs.columns):
+        dominant_cluster = int(cs.loc[cs["size"].idxmax(), "cluster"])
+        cs_moo = cs.copy()   # DO NOT FILTER (dominant cluster is only metadata)
+        K = int(len(cs_moo))
+    else:
+        dominant_cluster = None
+        cs_moo = pd.DataFrame()
+        K = 0
+
+    # N_total (aligned with your R: nrow(prepared[[city_id]]$X))
+    X = prepared[city_id].get("X", None)
+    if X is None:
+        raise ValueError(f"[Step 10] Missing X for city: {city_id}")
+    N_total = int(X.shape[0]) if hasattr(X, "shape") else int(len(X))
+
+    moo_clusters[city_id] = {
+        "cs": cs_moo,
+        "N_total": N_total,
+        "dominant_cluster": dominant_cluster,
+        "K": K
+    }
+
+    print(
+        f"{city_id} | dominant cluster: {dominant_cluster if dominant_cluster is not None else 'NA'}"
+        f" | clusters kept: {K}"
+        f" | N_total = {N_total}"
+    )
+
+# ------------------------------------------------------------
+# Step 10a — Reference cluster count (context for MOO comparison)
+# ------------------------------------------------------------
+for city_id, obj in moo_clusters.items():
+    print(f"CITY: {city_id.upper()} | K = {obj['K']}")
+# ------------------------------------------------------------
+# Step 11 — Trip-level unit direction vectors (FULL, aligned) — PYTHON (UNIFIED)
+# + Step 11a — Size-weighted within-cluster directional cohesion
+#
+# Compatible with your DBSCAN-style labels:
+#   noise_label = 0
+#   clusters = 1..K
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+# ------------------------------------------------------------
+# Step 11 — Build trip_dirs_full[city_id] = Nx2 array with columns [ux, uy]
+# Notes:
+# - In your Python pipeline, X_scaled is a NumPy array (no column names),
+#   so we preferentially read dx/dy from city_clean (same row alignment).
+# - If you later store dx/dy inside X_scaled as a DataFrame with colnames,
+#   this code will automatically use it.
+# ------------------------------------------------------------
+
+trip_dirs_full = {}
+
+for city_id in prepared.keys():
+
+    # Safety checks
+    if prepared[city_id].get("city_clean", None) is None:
+        raise ValueError(f"[Step 11] Missing city_clean for city: {city_id}")
+
+    df = prepared[city_id]["city_clean"]
+
+    # Prefer direction columns from X_scaled only if it's a DataFrame with dx/dy columns
+    dx = dy = None
+    Xs = prepared[city_id].get("X_scaled", None)
+
+    if isinstance(Xs, pd.DataFrame):
+        cn = list(Xs.columns)
+        if all(c in cn for c in ["dx", "dy"]):
+            dx = Xs["dx"].to_numpy(dtype=float)
+            dy = Xs["dy"].to_numpy(dtype=float)
+
+    # Fallback to table
+    if dx is None or dy is None:
+        if ("dx" not in df.columns) or ("dy" not in df.columns):
+            raise ValueError(
+                f"[Step 11] dx/dy not found for city {city_id}. "
+                "Add dx,dy to city_clean (or store dx,dy in X_scaled DataFrame)."
+            )
+        dx = df["dx"].to_numpy(dtype=float)
+        dy = df["dy"].to_numpy(dtype=float)
+
+    # Unit vectors
+    norm = np.sqrt(dx**2 + dy**2)
+    norm[norm == 0] = np.nan  # match your R behavior (zero-length vectors -> NA)
+
+    ux = dx / norm
+    uy = dy / norm
+
+    u = np.column_stack([ux, uy])  # Nx2
+    trip_dirs_full[city_id] = u
+
+# Sanity check: must match labels length (and X_scaled rows)
+for city_id in prepared.keys():
+    Xs = prepared[city_id].get("X_scaled", None)
+    if Xs is None:
+        raise ValueError(f"[Step 11] Missing X_scaled for city: {city_id}")
+    n_x = Xs.shape[0] if hasattr(Xs, "shape") else len(Xs)
+    n_u = trip_dirs_full[city_id].shape[0]
+    if n_x != n_u:
+        raise ValueError(f"[Step 11] Row mismatch for {city_id}: X_scaled={n_x}, trip_dirs_full={n_u}")
+
+print("Step 11 OK: trip_dirs_full built for cities:", list(trip_dirs_full.keys()))
+
+
+# ------------------------------------------------------------
+# Step 11a — Size-weighted within-cluster directional cohesion
+# Matches your R function exactly in logic:
+# - remove noise + NA + invalid vectors
+# - for each cluster: mean direction -> normalize -> mean cosine similarity
+# - size-weighted average across clusters
+# - optionally map [-1,1] to [0,1]
+# ------------------------------------------------------------
+
+def dir_cohesion_within_weighted(labels,
+                                 u,
+                                 noise_label=0,
+                                 min_cluster_size=2,
+                                 map_to_01=True):
+    """
+    labels: 1D array-like of cluster labels (DBSCAN-style: noise=0)
+    u: Nx2 array with columns [ux, uy] (unit direction vectors; may include NaN)
+    """
+
+    labels = np.asarray(labels, dtype=int)
+    u = np.asarray(u, dtype=float)
+
+    if u.ndim != 2 or u.shape[1] != 2:
+        raise ValueError("u must be an Nx2 array with columns [ux, uy]")
+
+    ux = u[:, 0]
+    uy = u[:, 1]
+
+    ok = (~np.isnan(labels)) & (labels != noise_label) & np.isfinite(ux) & np.isfinite(uy)
+    if not np.any(ok):
+        return 0.0
+
+    labels = labels[ok]
+    ux = ux[ok]
+    uy = uy[ok]
+
+    cl_ids = np.unique(labels)
+    if cl_ids.size == 0:
+        return 0.0
+
+    num = 0.0
+    den = 0.0
+
+    for cid in cl_ids:
+        idx = (labels == cid)
+        n = int(idx.sum())
+        if n < int(min_cluster_size):
+            continue
+
+        mx = float(np.mean(ux[idx]))
+        my = float(np.mean(uy[idx]))
+        nm = np.sqrt(mx*mx + my*my)
+
+        if (not np.isfinite(nm)) or (nm < 1e-12):
+            continue
+
+        mx /= nm
+        my /= nm
+
+        cos_i = ux[idx] * mx + uy[idx] * my
+        cos_i = np.clip(cos_i, -1.0, 1.0)
+
+        coh_c = float(np.mean(cos_i))
+
+        num += n * coh_c
+        den += n
+
+    if den == 0:
+        return 0.0
+
+    coh = num / den  # in [-1, 1]
+    return (coh + 1.0) / 2.0 if map_to_01 else coh
+
+
+# Quick tiny self-check (optional):
+# city_id = "berlin"
+# labels = prepared[city_id]["city_clean"]["cluster"].to_numpy()
+# coh = dir_cohesion_within_weighted(labels, trip_dirs_full[city_id], noise_label=0)
+# print(city_id, "cohesion_01:", coh)
+# ------------------------------------------------------------
+# Step 12 — Two objectives (parameter-configuration evaluation) [PYTHON]
+# Objective 1: maximize coverage (clustered trips share)
+# Objective 2: maximize within-cluster directional cohesion (size-weighted)
+#
+# NOTE (NSGA-II minimization form):
+# We return f1 = -coverage and f2 = -dir_cohesion.
+# In this objective space, "worst" is (0,0) and "best" is (-1,-1).
+# ------------------------------------------------------------
+
+import numpy as np
+
+def eval_solution(labels,
+                  u_trips,
+                  noise_label=0,
+                  min_cluster_size=2):
+    """
+    labels: 1D array-like (DBSCAN-style: noise=0, clusters=1..K)
+    u_trips: Nx2 array with columns [ux, uy]
+    returns: dict with f1/f2 + raw objectives + metadata
+    """
+
+    labels = np.asarray(labels, dtype=int)
+    u_trips = np.asarray(u_trips, dtype=float)
+
+    if u_trips.ndim != 2 or u_trips.shape[1] != 2:
+        raise ValueError("eval_solution: u_trips must be an Nx2 array with columns [ux, uy]")
+
+    N_total = int(labels.size)
+    if N_total <= 0:
+        raise ValueError("eval_solution: empty labels")
+
+    if u_trips.shape[0] != N_total:
+        raise ValueError("eval_solution: len(labels) must match nrow(u_trips)")
+
+    clustered = (labels != noise_label) & np.isfinite(u_trips[:, 0]) & np.isfinite(u_trips[:, 1])
+    n_clustered = int(clustered.sum())
+    coverage = float(n_clustered / N_total)
+
+    K = int(np.unique(labels[clustered]).size) if n_clustered > 0 else 0
+
+    coh = dir_cohesion_within_weighted(
+        labels=labels,
+        u=u_trips,
+        noise_label=noise_label,
+        min_cluster_size=min_cluster_size,
+        map_to_01=True
+    )
+
+    # NSGA-II minimizes => negate objectives
+    f1 = 0.0 if coverage == 0 else -coverage     # in [-1, 0], worst = 0
+    f2 = 0.0 if coverage == 0 else -float(coh)   # in [-1, 0], worst = 0
+
+    return {
+        "f1_neg_coverage": f1,
+        "f2_neg_dir_cohesion": f2,
+        "coverage": coverage,
+        "dir_cohesion": float(coh),
+        "K": K,
+        "clustered_n": n_clustered,
+        "N_total": N_total
+    }
+
+
+# ------------------------------------------------------------
+# Step 12a — Sanity checks (per city) using FULL directions
+# ------------------------------------------------------------
+
+rng = np.random.default_rng(1)
+
+for city_id in trip_dirs_full.keys():
+
+    u_trips = trip_dirs_full[city_id]
+    N = int(u_trips.shape[0])
+
+    print(f"\nCITY: {city_id.upper()}")
+    print("N trips =", N)
+
+    labels_all_noise = np.zeros(N, dtype=int)
+    print(eval_solution(labels_all_noise, u_trips, noise_label=0))
+
+    labels_one_cluster = np.ones(N, dtype=int)
+    print(eval_solution(labels_one_cluster, u_trips, noise_label=0))
+
+    labels_toy = np.zeros(N, dtype=int)
+    clustered_idx = rng.choice(N, size=int(np.floor(0.7 * N)), replace=False)
+    labels_toy[clustered_idx] = rng.integers(1, 21, size=clustered_idx.size)  # 1..20
+    print(eval_solution(labels_toy, u_trips, noise_label=0))
+
+
+# ------------------------------------------------------------
+# Step 12b — Random sanity checks (per city) using FULL directions
+# ------------------------------------------------------------
+
+rng = np.random.default_rng(1)
+
+for city_id in trip_dirs_full.keys():
+
+    u_trips = trip_dirs_full[city_id]
+    N = int(u_trips.shape[0])
+
+    print(f"\nCITY: {city_id.upper()}")
+
+    for i in range(1, 6):
+
+        clustered_share = float(rng.uniform(0.3, 0.9))
+        K_toy = int(rng.choice([5, 10, 20, 40]))
+
+        labels = np.zeros(N, dtype=int)
+        clustered_idx = rng.choice(N, size=int(np.floor(clustered_share * N)), replace=False)
+        labels[clustered_idx] = rng.integers(1, K_toy + 1, size=clustered_idx.size)  # 1..K_toy
+
+        res = eval_solution(labels, u_trips, noise_label=0)
+
+        print(
+            "draw", i,
+            "| clustered_share ~", round(clustered_share, 2),
+            "| K_toy =", K_toy,
+            "| f1 =", round(res["f1_neg_coverage"], 6),
+            "| f2 =", round(res["f2_neg_dir_cohesion"], 6),
+            "| coverage =", round(res["coverage"], 4),
+            "| cohesion =", round(res["dir_cohesion"], 4),
+        )
+# ------------------------------------------------------------
+# Step 14 — NSGA-II for HDBSCAN (ALIGNED + HARDENED) [FINAL]
+# - Optimizes on SUBSAMPLE (N_SUB) per city for budget fairness
+# - Objectives: minimize (-coverage, -dir_cohesion)
+# - Discrete snapping to allowed grids + caching
+# - Knee selection: maximin balance (same as your draft)
+# ------------------------------------------------------------
+
+# If not installed yet (Colab):
+# !pip -q install pymoo hdbscan
+
+import numpy as np
+import pandas as pd
+import hdbscan
+import matplotlib.pyplot as plt
+
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.optimize import minimize
+from pymoo.termination import get_termination
+from pymoo.operators.sampling.rnd import FloatRandomSampling
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+
+
+# ==========================================================
+# (A) Discrete snapping helpers (single source of truth)
+# ==========================================================
+
+def snap_scalar(v, allowed):
+    allowed = np.asarray(allowed, dtype=int)
+    v = int(np.round(v))
+    return int(allowed[np.argmin(np.abs(allowed - v))])
+
+def mcs_allowed_from_subsample(N_eff, n=14, frac_min=0.005, frac_max=0.10):
+    lo = max(10, int(round(frac_min * N_eff)))
+    hi = max(lo + 1, int(round(frac_max * N_eff)))
+    vals = np.unique(np.round(np.exp(np.linspace(np.log(lo), np.log(hi), n))).astype(int))
+    return vals.tolist()
+
+
+# ==========================================================
+# (B) Objective: evaluate HDBSCAN params -> (f1,f2) to MINIMIZE
+#     Uses YOUR Step 12 eval_solution() + Step 11 cohesion function.
+# ==========================================================
+
+def eval_hdbscan_params(min_cluster_size, min_samples, X_scaled, u_trips,
+                        min_cluster_size_for_cohesion=2,
+                        cohesion_floor=None,
+                        cluster_selection_method="eom",
+                        core_dist_n_jobs=1):
+    """
+    Returns np.array([f1_neg_coverage, f2_neg_dir_cohesion]) to MINIMIZE
+    - f1 = -coverage
+    - f2 = -dir_cohesion
+
+    Important:
+    - We map HDBSCAN labels (-1 noise, 0..K-1 clusters) -> DBSCAN-style (0 noise, 1..K)
+      so that eval_solution(noise_label=0) remains consistent everywhere.
+    """
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=int(min_cluster_size),
+        min_samples=int(min_samples),
+        metric="euclidean",
+        cluster_selection_method=cluster_selection_method,
+        core_dist_n_jobs=int(core_dist_n_jobs)
+    )
+
+    labels = clusterer.fit_predict(X_scaled).astype(int)  # -1 noise
+
+    # Map to DBSCAN-style for eval_solution consistency:
+    labels_dbscan_style = np.where(labels == -1, 0, labels + 1)
+
+    res = eval_solution(
+        labels=labels_dbscan_style,
+        u_trips=u_trips,
+        noise_label=0,
+        min_cluster_size=int(min_cluster_size_for_cohesion)
+    )
+
+    # Optional soft filter: remove "directionless" solutions
+    if cohesion_floor is not None:
+        if (not np.isfinite(res["dir_cohesion"])) or (res["dir_cohesion"] < float(cohesion_floor)):
+            return np.array([1.0, 1.0], dtype=float)
+
+    return np.array([res["f1_neg_coverage"], res["f2_neg_dir_cohesion"]], dtype=float)
+
+
+# ==========================================================
+# (C) Cached objective per city + snapping to allowed grids
+# ==========================================================
+
+def make_objfun_city_cached(city_id, data_for_opt, trip_dirs_for_opt,
+                            mcs_allowed, ms_allowed,
+                            min_cluster_size_for_cohesion=2,
+                            cohesion_floor=None,
+                            cluster_selection_method="eom",
+                            core_dist_n_jobs=1):
+
+    X_scaled = data_for_opt[city_id]["X_scaled"]
+    u_trips  = trip_dirs_for_opt[city_id]
+
+    if X_scaled.shape[0] != np.asarray(u_trips).shape[0]:
+        raise ValueError(f"{city_id}: X_scaled rows != trip_dirs rows")
+
+    cache = {}
+
+    mcs_allowed = np.asarray(mcs_allowed, dtype=int)
+    ms_allowed  = np.asarray(ms_allowed, dtype=int)
+
+    def objfun(x):
+        # snap to allowed grids
+        mcs = snap_scalar(x[0], mcs_allowed)
+        ms  = snap_scalar(x[1], ms_allowed)
+
+        key = (int(mcs), int(ms))
+        if key in cache:
+            return cache[key]
+
+        val = eval_hdbscan_params(
+            min_cluster_size=mcs,
+            min_samples=ms,
+            X_scaled=X_scaled,
+            u_trips=u_trips,
+            min_cluster_size_for_cohesion=min_cluster_size_for_cohesion,
+            cohesion_floor=cohesion_floor,
+            cluster_selection_method=cluster_selection_method,
+            core_dist_n_jobs=core_dist_n_jobs
+        )
+        cache[key] = val
+        return val
+
+    info = {
+        "mcs_allowed": mcs_allowed.tolist(),
+        "ms_allowed": ms_allowed.tolist(),
+        "mcs_min": int(mcs_allowed.min()),
+        "mcs_max": int(mcs_allowed.max()),
+        "ms_min": int(ms_allowed.min()),
+        "ms_max": int(ms_allowed.max()),
+        "N_eff": int(X_scaled.shape[0]),
+    }
+    return objfun, info
+
+
+# ==========================================================
+# (D) Subsample for optimization (shared indices) — like your R DBSCAN block
+# ==========================================================
+
+rng = np.random.default_rng(1)
+N_SUB = 10_000
+
+data_for_opt = {}
+trip_dirs_for_opt = {}
+sub_idx_by_city = {}
+
+for city_id, res in prepared.items():
+    Xs = res["X_scaled"]
+    n = Xs.shape[0]
+    idx = rng.choice(n, size=N_SUB, replace=False) if n > N_SUB else np.arange(n)
+    sub_idx_by_city[city_id] = idx
+
+    data_for_opt[city_id] = {"X_scaled": Xs[idx, :]}
+    trip_dirs_for_opt[city_id] = np.asarray(trip_dirs_full[city_id])[idx, :]
+
+print("\n[HDBSCAN] Subsample sizes:")
+for city_id in prepared.keys():
+    print(city_id, "FULL =", prepared[city_id]["X_scaled"].shape[0],
+          "| SUB =", data_for_opt[city_id]["X_scaled"].shape[0])
+
+
+# ==========================================================
+# (E) NSGA-II run per city
+# ==========================================================
+
+# Allowed min_samples grid (use your chosen set)
+ms_allowed = [10, 15, 20, 25, 30, 35, 40, 50, 60]
+
+# Cohesion soft floor (optional). If you want no filtering, set to None.
+COHESION_FLOOR = None   # e.g., 0.502 like your draft
+
+# For fairness across cities
+popsize = 100
+generations = 50
+
+cluster_selection_method = "eom"
+core_dist_n_jobs = 1
+
+bounds_used = {}
+nsga_results = {}
+pareto_tables_hdb = {}
+knee_solutions_hdb = {}
+
+for city_id in prepared.keys():
+
+    N_eff = data_for_opt[city_id]["X_scaled"].shape[0]
+    mcs_allowed = mcs_allowed_from_subsample(N_eff, n=14, frac_min=0.005, frac_max=0.10)
+
+    objfun, info = make_objfun_city_cached(
+        city_id=city_id,
+        data_for_opt=data_for_opt,
+        trip_dirs_for_opt=trip_dirs_for_opt,
+        mcs_allowed=mcs_allowed,
+        ms_allowed=ms_allowed,
+        min_cluster_size_for_cohesion=2,     # match Step 12 default
+        cohesion_floor=COHESION_FLOOR,
+        cluster_selection_method=cluster_selection_method,
+        core_dist_n_jobs=core_dist_n_jobs
+    )
+    bounds_used[city_id] = info
+
+    mcs_min, mcs_max = info["mcs_min"], info["mcs_max"]
+    ms_min, ms_max = info["ms_min"], info["ms_max"]
+
+    # Define city-specific problem
+    class CityProblem(ElementwiseProblem):
+        def __init__(self):
+            super().__init__(n_var=2, n_obj=2, n_constr=0,
+                             xl=np.array([mcs_min, ms_min], dtype=float),
+                             xu=np.array([mcs_max, ms_max], dtype=float))
+
+        def _evaluate(self, x, out, *args, **kwargs):
+            out["F"] = objfun(x)
+
+    problem = CityProblem()
+
+    algorithm = NSGA2(
+        pop_size=popsize,
+        sampling=FloatRandomSampling(),
+        crossover=SBX(prob=0.9, eta=15),
+        mutation=PM(eta=20),
+        eliminate_duplicates=True
+    )
+
+    res = minimize(
+        problem,
+        algorithm,
+        get_termination("n_gen", generations),
+        seed=1,
+        save_history=False,
+        verbose=False
+    )
+
+    nsga_results[city_id] = res
+
+    print(f"\nDONE {city_id.upper()} | N_eff={info['N_eff']} | "
+          f"mcs[{mcs_min},{mcs_max}] | pop={popsize} gen={generations}")
+
+    # ======================================================
+    # (F) Build Pareto table + knee (maximin) + plot
+    # ======================================================
+
+    X = np.asarray(res.X)
+    F = np.asarray(res.F)
+
+    mcs_snap = np.array([snap_scalar(v, info["mcs_allowed"]) for v in X[:, 0]], dtype=int)
+    ms_snap  = np.array([snap_scalar(v, info["ms_allowed"]) for v in X[:, 1]], dtype=int)
+
+    df = pd.DataFrame({
+        "city": city_id,
+        "min_cluster_size": mcs_snap,
+        "min_samples": ms_snap,
+        "coverage": -F[:, 0],
+        "dir_cohesion": -F[:, 1]
+    })
+
+    # Keep only valid and unique configs
+    df = df[(df["coverage"] >= 0) & (df["dir_cohesion"] >= 0)].copy()
+    df = df.drop_duplicates(subset=["min_cluster_size", "min_samples"]).reset_index(drop=True)
+    pareto_tables_hdb[city_id] = df
+
+    # Knee by maximin balance (same as your draft)
+    cov = df["coverage"].to_numpy(dtype=float)
+    coh = df["dir_cohesion"].to_numpy(dtype=float)
+
+    cov_n = (cov - cov.min()) / (cov.max() - cov.min() + 1e-12)
+    coh_n = (coh - coh.min()) / (coh.max() - coh.min() + 1e-12)
+
+    knee_idx = int(np.argmax(np.minimum(cov_n, coh_n)))
+    knee = df.iloc[[knee_idx]].copy()
+    knee_solutions_hdb[city_id] = knee
+
+    print(f"CITY {city_id.upper()} | Pareto={len(df)} | KNEE:")
+    print(knee)
+
+    plt.figure()
+    plt.scatter(df["coverage"], df["dir_cohesion"], s=20, alpha=0.8)
+    plt.scatter(knee["coverage"], knee["dir_cohesion"], s=120, marker="x")
+    plt.title(f"HDBSCAN Pareto (subsample) — {city_id.upper()}")
+    plt.xlabel("Coverage (clustered share)")
+    plt.ylabel("Directional cohesion (size-weighted, mapped [0,1])")
+    plt.grid(True)
+    plt.show()
+
+print("Step 14 HDBSCAN NSGA-II done.")
+# ==========================================================
+# Print ALL HDBSCAN Pareto points (per city) — Python
+# Mirrors your R "print all Pareto rows" block
+# Assumes you have: pareto_tables_hdb[city_id] from Step 14
+# ==========================================================
+
+import pandas as pd
+
+# Make pandas print everything (like options(max.print=1e6))
+pd.set_option("display.max_rows", 1_000_000)
+pd.set_option("display.max_columns", 200)
+pd.set_option("display.width", 200)
+
+for city_id in pareto_tables_hdb.keys():
+
+    print("\n========================================")
+    print("[HDBSCAN] CITY:", city_id.upper())
+    print("N Pareto points:", len(pareto_tables_hdb[city_id]))
+    print("========================================\n")
+
+    df = pareto_tables_hdb[city_id]
+
+    if df is None or len(df) == 0:
+        print("No valid Pareto rows.")
+        continue
+
+    # Optional: sort by coverage for readability (same as your R block)
+    df2 = df.sort_values("coverage", ascending=True).reset_index(drop=True)
+
+    # Print full table
+    print(df2.to_string(index=False))
+# ------------------------------------------------------------
+# Step 15 — Validate selected HDBSCAN Pareto configs on FULL data (Python)
+# Selection strategy (per city):
+#   - knee (from subsample Pareto)
+#   - 2 minimally higher-coverage points
+#   - 2 minimally higher-cohesion points
+#
+# Uses FULL data objects:
+#   prepared_full = prepared
+#
+# Assumes from Step 14:
+#   pareto_tables_hdb[city_id] with columns:
+#     ["city","min_cluster_size","min_samples","coverage","dir_cohesion"]
+#   knee_solutions_hdb[city_id] (1-row DataFrame)
+#
+# Assumes from Step 11:
+#   trip_dirs_full[city_id] is Nx2 [ux,uy] aligned with FULL X_scaled rows
+#
+# Assumes DBSCAN-style evaluation:
+#   - map HDBSCAN labels (-1,0..) -> (0 noise, 1.. clusters)
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+import hdbscan
+
+
+# ---- Freeze FULL data object
+prepared_full = prepared
+
+# ---- Quick sanity: print full sizes
+for city_id in prepared_full.keys():
+    print("[HDBSCAN] FULL:", city_id.upper(), "N =", prepared_full[city_id]["X_scaled"].shape[0])
+
+# If subsample objects exist from Step 14, print them too
+if "data_for_opt" in globals():
+    for city_id in data_for_opt.keys():
+        print("[HDBSCAN] SUB :", city_id.upper(), "N =", data_for_opt[city_id]["X_scaled"].shape[0])
+
+
+# ----------------------------------------------------------
+# Clean + deduplicate Pareto table (from subsample NSGA-II)
+# ----------------------------------------------------------
+pareto_unique_hdb = {}
+
+for city_id, df in pareto_tables_hdb.items():
+
+    if df is None or len(df) == 0:
+        pareto_unique_hdb[city_id] = df
+        continue
+
+    df2 = df.loc[:, ["city", "min_cluster_size", "min_samples", "coverage", "dir_cohesion"]].copy()
+
+    df2["min_cluster_size"] = df2["min_cluster_size"].astype(int)
+    df2["min_samples"] = df2["min_samples"].astype(int)
+    df2["coverage"] = pd.to_numeric(df2["coverage"], errors="coerce")
+    df2["dir_cohesion"] = pd.to_numeric(df2["dir_cohesion"], errors="coerce")
+
+    df2 = df2[np.isfinite(df2["coverage"]) & np.isfinite(df2["dir_cohesion"])].copy()
+    df2 = df2[(df2["coverage"] >= 0) & (df2["dir_cohesion"] >= 0)].copy()
+
+    df2 = df2.drop_duplicates(subset=["min_cluster_size", "min_samples"]).reset_index(drop=True)
+
+    pareto_unique_hdb[city_id] = df2
+
+
+# ----------------------------------------------------------
+# Select ~5 configs around knee
+# ----------------------------------------------------------
+def select_configs_hdb(df: pd.DataFrame, knee_row: pd.DataFrame, n_each: int = 2) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return df
+
+    # fallback if knee missing
+    if knee_row is None or (not isinstance(knee_row, pd.DataFrame)) or len(knee_row) == 0:
+        df_sorted = df.sort_values(["coverage", "dir_cohesion"], ascending=[False, False]).reset_index(drop=True)
+        return df_sorted.head(min(5, len(df_sorted)))
+
+    # match knee by parameters (preferred)
+    kmcs = int(knee_row["min_cluster_size"].iloc[0])
+    kms = int(knee_row["min_samples"].iloc[0])
+
+    knee_match = df[(df["min_cluster_size"] == kmcs) & (df["min_samples"] == kms)].copy()
+
+    if len(knee_match) == 0:
+        # fallback: match by objective values
+        kcov = float(knee_row["coverage"].iloc[0])
+        kcoh = float(knee_row["dir_cohesion"].iloc[0])
+        knee_match = df[(np.abs(df["coverage"] - kcov) < 1e-12) &
+                        (np.abs(df["dir_cohesion"] - kcoh) < 1e-12)].copy()
+
+    if len(knee_match) == 0:
+        # last resort: best by (coverage, cohesion)
+        knee_match = df.sort_values(["coverage", "dir_cohesion"], ascending=[False, False]).head(1).copy()
+    else:
+        knee_match = knee_match.head(1).copy()
+
+    knee_cov = float(knee_match["coverage"].iloc[0])
+    knee_coh = float(knee_match["dir_cohesion"].iloc[0])
+
+    higher_cov = (
+        df[df["coverage"] > knee_cov]
+        .sort_values(["coverage", "dir_cohesion"], ascending=[True, False])
+        .head(n_each)
+    )
+
+    higher_coh = (
+        df[df["dir_cohesion"] > knee_coh]
+        .sort_values(["dir_cohesion", "coverage"], ascending=[True, False])
+        .head(n_each)
+    )
+
+    chosen = pd.concat([knee_match, higher_cov, higher_coh], ignore_index=True)
+    chosen = chosen.drop_duplicates(subset=["min_cluster_size", "min_samples"]).head(1 + 2*n_each).reset_index(drop=True)
+
+    return chosen
+
+
+# ----------------------------------------------------------
+# FULL-data evaluation of one HDBSCAN config
+# ----------------------------------------------------------
+def full_eval_one_hdb(city_id: str,
+                      min_cluster_size: int,
+                      min_samples: int,
+                      prepared_full: dict,
+                      cluster_selection_method: str = "eom",
+                      core_dist_n_jobs: int = 1,
+                      min_cluster_size_for_cohesion: int = 2) -> pd.DataFrame:
+
+    X_full = prepared_full[city_id]["X_scaled"]
+    df_full = prepared_full[city_id]["city_clean"]
+    assert X_full.shape[0] == df_full.shape[0]
+
+    # unit directions aligned to FULL rows (use Step 11 output)
+    u_full = np.asarray(trip_dirs_full[city_id], dtype=float)
+    if u_full.shape[0] != X_full.shape[0]:
+        raise ValueError(f"{city_id}: trip_dirs_full rows != X_full rows")
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=int(min_cluster_size),
+        min_samples=int(min_samples),
+        metric="euclidean",
+        cluster_selection_method=cluster_selection_method,
+        core_dist_n_jobs=int(core_dist_n_jobs)
+    )
+
+    labels = clusterer.fit_predict(X_full).astype(int)  # -1 noise
+    labels_dbscan_style = np.where(labels == -1, 0, labels + 1)
+
+    res = eval_solution(
+        labels=labels_dbscan_style,
+        u_trips=u_full,
+        noise_label=0,
+        min_cluster_size=int(min_cluster_size_for_cohesion)
+    )
+
+    # Add extra summary fields (like your R full_eval_one_dbscan)
+    noise_pct = 100.0 * float((labels_dbscan_style == 0).mean())
+    clustered_pct = 100.0 * float(res["coverage"])
+
+    out = pd.DataFrame([{
+        "city": city_id,
+        "min_cluster_size": int(min_cluster_size),
+        "min_samples": int(min_samples),
+        "coverage": float(res["coverage"]),
+        "clustered_pct": float(clustered_pct),
+        "dir_cohesion": float(res["dir_cohesion"]),
+        "n_clusters": int(res["K"]),
+        "noise_pct": float(noise_pct),
+        "n_total": int(res["N_total"])
+    }])
+
+    return out
+
+
+# ----------------------------------------------------------
+# Run FULL validation for selected Pareto configs + expert baseline
+# ----------------------------------------------------------
+full_validated_hdb = {}
+
+# Optional expert baseline dictionary (if you have it)
+# Example:
+# hdbscan_params = {
+#     "berlin":  {"minPts": 50},
+#     "munich":  {"minPts": 45},
+#     "cologne": {"minPts": 50},
+# }
+# MIN_CLUSTER_SIZE_FIXED = 20
+
+for city_id in pareto_unique_hdb.keys():
+
+    df = pareto_unique_hdb[city_id]
+    knee = knee_solutions_hdb.get(city_id, None)
+
+    if df is None or len(df) == 0:
+        print("[HDBSCAN] Skipping", city_id.upper(), "(no Pareto rows).")
+        continue
+
+    chosen = select_configs_hdb(df, knee_row=knee, n_each=2)
+
+    print(f"\n[HDBSCAN] Validating {len(chosen)} Pareto configs on FULL data for {city_id.upper()}")
+
+    pareto_out = pd.concat([
+        full_eval_one_hdb(
+            city_id,
+            int(chosen.loc[i, "min_cluster_size"]),
+            int(chosen.loc[i, "min_samples"]),
+            prepared_full
+        )
+        for i in range(len(chosen))
+    ], ignore_index=True)
+
+    pareto_out["config"] = "pareto_local"
+
+    # ---- Expert baseline (if exists)
+    expert_out = None
+    if "hdbscan_params" in globals() and city_id in hdbscan_params:
+        ex_min_samples = int(hdbscan_params[city_id]["minPts"])
+        ex_mcs = int(MIN_CLUSTER_SIZE_FIXED) if "MIN_CLUSTER_SIZE_FIXED" in globals() else int(chosen["min_cluster_size"].mode().iloc[0])
+        expert_out = full_eval_one_hdb(city_id, ex_mcs, ex_min_samples, prepared_full)
+        expert_out["config"] = "expert"
+
+    out_city = pd.concat([pareto_out, expert_out], ignore_index=True) if expert_out is not None else pareto_out
+    full_validated_hdb[city_id] = out_city
+
+
+full_validated_hdb_df = pd.concat(full_validated_hdb.values(), ignore_index=True) if len(full_validated_hdb) > 0 else pd.DataFrame()
+print(full_validated_hdb_df)
+
+
+# ----------------------------------------------------------
+# Re-select knee on FULL data (among validated Pareto configs only)
+# ----------------------------------------------------------
+knee_full_hdb = None
+
+if len(full_validated_hdb_df) > 0:
+
+    dfp = full_validated_hdb_df[full_validated_hdb_df["config"] == "pareto_local"].copy()
+
+    if len(dfp) > 0:
+        knee_rows = []
+
+        for city_id in dfp["city"].unique():
+            d = dfp[dfp["city"] == city_id].copy()
+
+            cov = d["coverage"].to_numpy(dtype=float)
+            coh = d["dir_cohesion"].to_numpy(dtype=float)
+
+            cov_n = (cov - cov.min()) / (cov.max() - cov.min() + 1e-12)
+            coh_n = (coh - coh.min()) / (coh.max() - coh.min() + 1e-12)
+
+            dist_ideal = np.sqrt((1 - cov_n)**2 + (1 - coh_n)**2)
+            j = int(np.argmin(dist_ideal))
+
+            row = d.iloc[[j]].copy()
+            row["config"] = "knee_full"
+            knee_rows.append(row)
+
+        knee_full_hdb = pd.concat(knee_rows, ignore_index=True)
+
+        print("\n[HDBSCAN] KNEE (FULL data, among validated Pareto configs):")
+        print(knee_full_hdb.loc[:, ["city","config","min_cluster_size","min_samples",
+                                   "coverage","clustered_pct","dir_cohesion","n_clusters","noise_pct"]])
+
+        # Compare to expert (if present)
+        compare_df = full_validated_hdb_df[full_validated_hdb_df["config"] == "expert"].copy()
+        compare_df = pd.concat([compare_df, knee_full_hdb], ignore_index=True)
+
+        compare_df = compare_df.loc[:, ["city","config","min_cluster_size","min_samples",
+                                       "coverage","clustered_pct","dir_cohesion","n_clusters","noise_pct"]]
+        compare_df["config"] = pd.Categorical(compare_df["config"], categories=["expert", "knee_full"], ordered=True)
+        compare_df = compare_df.sort_values(["city", "config"])
+
+        print("\n[HDBSCAN] EXPERT vs KNEE_FULL (FULL data):")
+        print(compare_df.to_string(index=False))
+# ------------------------------------------------------------
+# Step 16 — Hypervolume analysis for Pareto fronts (coverage + cohesion) [PYTHON]
+# - Works for multiple algorithms (e.g., DBSCAN + SNN + HDBSCAN)
+# - Uses columns: coverage, dir_cohesion
+# - Global normalization across ALL cities AND ALL algorithms
+# - Converts to MIN space: f1 = 1 - coverage_norm, f2 = 1 - cohesion_norm
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# -----------------------------
+# Non-dominated filter for MINIMIZATION
+# -----------------------------
+def nondominated_min(F: np.ndarray) -> np.ndarray:
+    """
+    Keep rows not dominated in minimization:
+    j dominates i if all(F[j] <= F[i]) and any(F[j] < F[i])
+    """
+    F = np.asarray(F, dtype=float)
+    n = F.shape[0]
+    if n == 0:
+        return F
+
+    keep = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not keep[i]:
+            continue
+        for j in range(n):
+            if i == j or not keep[i]:
+                continue
+            if np.all(F[j, :] <= F[i, :]) and np.any(F[j, :] < F[i, :]):
+                keep[i] = False
+    return F[keep, :]
+
+
+# -----------------------------
+# Exact 2D dominated hypervolume for MINIMIZATION
+# -----------------------------
+def hv2d_min(F: np.ndarray, ref: np.ndarray) -> float:
+    """
+    2D hypervolume for minimization, dominated area between points and ref.
+    Assumes smaller is better; ref is a "worse" point (larger coordinates).
+    """
+    F = np.asarray(F, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+
+    if F.shape[0] == 0:
+        return 0.0
+
+    F = nondominated_min(F)
+
+    # sort by f1 then f2 (like your R order)
+    order = np.lexsort((F[:, 1], F[:, 0]))
+    F = F[order, :]
+
+    hv = 0.0
+    h = float(ref[1])
+    for i in range(F.shape[0]):
+        f1 = float(F[i, 0])
+        f2 = float(F[i, 1])
+        if f2 < h:
+            hv += (float(ref[0]) - f1) * (h - f2)
+            h = f2
+    return float(hv)
+
+
+def hv2d_contrib_min(F: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    hv_all = hv2d_min(F, ref)
+    n = F.shape[0]
+    if n == 0:
+        return np.array([], dtype=float)
+    contrib = np.array([hv_all - hv2d_min(np.delete(F, i, axis=0), ref) for i in range(n)], dtype=float)
+    return contrib
+
+
+# -----------------------------
+# Safe normalization
+# -----------------------------
+def safe_norm(z, zmin, zmax):
+    z = np.asarray(z, dtype=float)
+    if (not np.isfinite(zmin)) or (not np.isfinite(zmax)) or np.isclose(zmax, zmin):
+        return np.zeros_like(z)
+    return (z - zmin) / (zmax - zmin)
+
+
+# -----------------------------
+# Gini coefficient for contribution concentration
+# -----------------------------
+def gini(x):
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.nan
+    x = np.sort(np.maximum(0.0, x))
+    s = float(x.sum())
+    if s <= 0:
+        return 0.0
+    n = x.size
+    return float((2.0 * (np.arange(1, n + 1) * x).sum() / (n * s)) - (n + 1) / n)
+
+
+# -----------------------------
+# Collect Pareto tables from ALL algorithms you have
+# Provide a dict: { "ALGO": {city_id: df_city_pareto}, ... }
+# ------------------------------------------------------------
+pareto_by_algo = {}
+
+# If you have these in your notebook, plug them in:
+# - DBSCAN (R-side results imported to python) might be in pareto_dbscan_py
+# - SNN might be in pareto_snn_py
+# - HDBSCAN (python) is pareto_tables_hdb from Step 14
+
+# Example: include HDBSCAN (we know this exists from your pipeline)
+if "pareto_tables_hdb" in globals():
+    pareto_by_algo["HDBSCAN"] = pareto_tables_hdb
+
+# If you also loaded DBSCAN/SNN pareto fronts into python, register them like this:
+# pareto_by_algo["DBSCAN"] = pareto_dbscan_py
+# pareto_by_algo["SNN"]    = pareto_snn_py
+
+if len(pareto_by_algo) == 0:
+    raise ValueError("No Pareto tables found. Add at least one algorithm to pareto_by_algo.")
+
+print("Algorithms included in HV:", list(pareto_by_algo.keys()))
+
+
+# -----------------------------
+# Build global pool for normalization (ALL cities + ALL algos)
+# -----------------------------
+all_rows = []
+
+for algo, pt_list in pareto_by_algo.items():
+    if pt_list is None:
+        continue
+    for city_id, df in pt_list.items():
+        if df is None or len(df) == 0:
+            continue
+        if not all(c in df.columns for c in ["coverage", "dir_cohesion"]):
+            raise ValueError(f"{algo}/{city_id}: missing required columns: coverage, dir_cohesion")
+
+        df2 = df.loc[:, ["coverage", "dir_cohesion"]].copy()
+        df2["algorithm"] = algo
+        df2["city"] = city_id
+
+        df2 = df2[np.isfinite(df2["coverage"]) & np.isfinite(df2["dir_cohesion"])].copy()
+        if len(df2) == 0:
+            continue
+
+        all_rows.append(df2)
+
+all_pts = pd.concat(all_rows, ignore_index=True) if len(all_rows) > 0 else pd.DataFrame()
+
+if all_pts is None or len(all_pts) == 0:
+    hv_results = pd.DataFrame()
+    print("No valid Pareto points available for HV analysis.")
+else:
+    cov_min = float(all_pts["coverage"].min())
+    cov_max = float(all_pts["coverage"].max())
+    coh_min = float(all_pts["dir_cohesion"].min())
+    coh_max = float(all_pts["dir_cohesion"].max())
+
+    # Reference point in MIN space (slightly worse than worst = 1)
+    ref_min = np.array([1.05, 1.05], dtype=float)
+    hv_max = float(np.prod(ref_min - np.array([0.0, 0.0])))
+
+    # -----------------------------
+    # Compute HV per (algorithm, city)
+    # -----------------------------
+    out_rows = []
+
+    for algo, pt_list in pareto_by_algo.items():
+        for city_id, df in pt_list.items():
+
+            if df is None or len(df) == 0:
+                out_rows.append({
+                    "algorithm": algo,
+                    "city": city_id,
+                    "n_points": 0,
+                    "hv_raw": np.nan,
+                    "hv_unit": np.nan,
+                    "contrib_gini": np.nan,
+                    "contrib_top10_share": np.nan,
+                    "contrib_cv": np.nan
+                })
+                continue
+
+            df2 = df.loc[:, ["coverage", "dir_cohesion"]].copy()
+            df2 = df2[np.isfinite(df2["coverage"]) & np.isfinite(df2["dir_cohesion"])].copy()
+
+            if len(df2) == 0:
+                out_rows.append({
+                    "algorithm": algo,
+                    "city": city_id,
+                    "n_points": 0,
+                    "hv_raw": np.nan,
+                    "hv_unit": np.nan,
+                    "contrib_gini": np.nan,
+                    "contrib_top10_share": np.nan,
+                    "contrib_cv": np.nan
+                })
+                continue
+
+            cov_n = safe_norm(df2["coverage"].to_numpy(), cov_min, cov_max)
+            coh_n = safe_norm(df2["dir_cohesion"].to_numpy(), coh_min, coh_max)
+
+            # MIN space for HV
+            Fmin = np.column_stack([1.0 - cov_n, 1.0 - coh_n])
+
+            hv_raw = hv2d_min(Fmin, ref_min)
+            hv_unit = hv_raw / hv_max if hv_max > 0 else np.nan
+
+            contrib = hv2d_contrib_min(Fmin, ref_min)
+            contrib = contrib[np.isfinite(contrib)]
+
+            if contrib.size == 0 or np.isclose(contrib.sum(), 0.0):
+                top10_share = np.nan
+                contrib_cv = np.nan
+            else:
+                n_top = max(1, int(np.floor(0.1 * contrib.size)))
+                top10_share = float(np.sort(contrib)[::-1][:n_top].sum() / contrib.sum())
+                contrib_cv = float(np.std(contrib) / np.mean(contrib)) if (contrib.size > 1 and np.mean(contrib) > 0) else np.nan
+
+            out_rows.append({
+                "algorithm": algo,
+                "city": city_id,
+                "n_points": int(len(df2)),
+                "hv_raw": float(hv_raw),
+                "hv_unit": float(hv_unit),
+                "contrib_gini": float(gini(contrib)),
+                "contrib_top10_share": float(top10_share) if np.isfinite(top10_share) else np.nan,
+                "contrib_cv": float(contrib_cv) if np.isfinite(contrib_cv) else np.nan
+            })
+
+    hv_results = pd.DataFrame(out_rows)
+    hv_results = hv_results.sort_values(["algorithm", "hv_unit", "city"], ascending=[True, False, True]).reset_index(drop=True)
+
+    print("\n===== Hypervolume results (global normalization) =====")
+    print(hv_results.to_string(index=False))
+
+    hv_summary_df = hv_results.loc[:, ["algorithm", "city", "hv_unit", "contrib_gini"]].copy()
+    hv_summary_df = hv_summary_df.rename(columns={"contrib_gini": "gini"})
+
+
+    # -----------------------------
+    # Optional plots (matplotlib)
+    # -----------------------------
+    if len(hv_summary_df) > 0:
+
+        # 1) HV by city + algorithm (grouped bars)
+        cities = sorted(hv_summary_df["city"].unique().tolist())
+        algos = sorted(hv_summary_df["algorithm"].unique().tolist())
+
+        x = np.arange(len(cities))
+        width = 0.8 / max(1, len(algos))
+
+        plt.figure()
+        for i, algo in enumerate(algos):
+            y = []
+            for c in cities:
+                row = hv_summary_df[(hv_summary_df["city"] == c) & (hv_summary_df["algorithm"] == algo)]
+                y.append(float(row["hv_unit"].iloc[0]) if len(row) else np.nan)
+            plt.bar(x + i*width, y, width=width, label=algo)
+
+        plt.xticks(x + width*(len(algos)-1)/2, [c.upper() for c in cities])
+        plt.ylabel("Hypervolume (unit-scaled)")
+        plt.title("Unit-scaled hypervolume by city and algorithm")
+        plt.legend()
+        plt.grid(axis="y", alpha=0.3)
+        plt.show()
+
+        # 2) Gini by city + algorithm (grouped bars)
+        plt.figure()
+        for i, algo in enumerate(algos):
+            y = []
+            for c in cities:
+                row = hv_summary_df[(hv_summary_df["city"] == c) & (hv_summary_df["algorithm"] == algo)]
+                y.append(float(row["gini"].iloc[0]) if len(row) else np.nan)
+            plt.bar(x + i*width, y, width=width, label=algo)
+
+        plt.xticks(x + width*(len(algos)-1)/2, [c.upper() for c in cities])
+        plt.ylabel("Gini of HV contributions")
+        plt.title("Hypervolume shape (Gini) by city and algorithm")
+        plt.legend()
+        plt.grid(axis="y", alpha=0.3)
+        plt.show()
+
+        # 3) HV vs Gini scatter (label points)
+        plt.figure()
+        plt.scatter(hv_results["hv_unit"], hv_results["contrib_gini"])
+
+        for _, r in hv_results.iterrows():
+            label = f"{str(r['city']).upper()} {r['algorithm']}"
+            plt.text(float(r["hv_unit"]) + 0.01, float(r["contrib_gini"]) + 0.01, label, fontsize=8)
+
+        plt.xlabel("Global hypervolume (unit-scaled)")
+        plt.ylabel("Shape (Gini of HV contributions)")
+        plt.title("Global vs shape of Pareto fronts (all cities, all algorithms)")
+        plt.grid(True, alpha=0.3)
+        plt.show()
+# ------------------------------------------------------------
+# Flow plots for TOP-N clusters (HDBSCAN, Python) — DBSCAN-style labels
+# - Uses prepared_plot = prepared_full if exists else prepared
+# - Expects city_clean has x_o,y_o,x_d,y_d and will attach clusters from labels
+# - Noise label assumed 0 (because we map HDBSCAN -1 -> 0, clusters -> +1)
+# - Plots ONLY the top-N clusters (no background) like your plot_flow_topN_clean()
+# ------------------------------------------------------------
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+import hdbscan
+
+prepared_plot = prepared_full if "prepared_full" in globals() else prepared
+
+
+# ------------------------------------------------------------
+# Helper: select final HDBSCAN parameters per city (knee_full preferred)
+# Looks for:
+# 1) knee_full_hdb (DataFrame from Step 15) or knee_solutions_hdb (from Step 14)
+# 2) fallback: hdbscan_params + MIN_CLUSTER_SIZE_FIXED
+# ------------------------------------------------------------
+
+def get_hdbscan_selected_params(preferred="knee_full"):
+    out = {}
+
+    for city_id in prepared_plot.keys():
+
+        # 1) knee_full_hdb from Step 15 (preferred)
+        if preferred == "knee_full" and "knee_full_hdb" in globals():
+            kfh = knee_full_hdb
+            if isinstance(kfh, pd.DataFrame) and len(kfh) > 0:
+                row = kfh[kfh["city"] == city_id].head(1)
+                if len(row) == 1:
+                    out[city_id] = {
+                        "min_cluster_size": int(row["min_cluster_size"].iloc[0]),
+                        "min_samples": int(row["min_samples"].iloc[0]),
+                    }
+                    continue
+
+        # 1b) fallback: knee_solutions_hdb from Step 14 (subsample knee)
+        if preferred == "knee_full" and "knee_solutions_hdb" in globals():
+            knee = knee_solutions_hdb.get(city_id, None)
+            if isinstance(knee, pd.DataFrame) and len(knee) > 0:
+                out[city_id] = {
+                    "min_cluster_size": int(knee["min_cluster_size"].iloc[0]),
+                    "min_samples": int(knee["min_samples"].iloc[0]),
+                }
+                continue
+
+        # 2) expert fallback: hdbscan_params (minPts) + MIN_CLUSTER_SIZE_FIXED
+        if "hdbscan_params" in globals() and city_id in hdbscan_params:
+            mcs = int(MIN_CLUSTER_SIZE_FIXED) if "MIN_CLUSTER_SIZE_FIXED" in globals() else 20
+            out[city_id] = {
+                "min_cluster_size": mcs,
+                "min_samples": int(hdbscan_params[city_id]["minPts"]),
+            }
+            continue
+
+        raise ValueError(
+            f"[HDBSCAN] No selected parameters found for city: {city_id}. "
+            "Need knee_full_hdb/knee_solutions_hdb or hdbscan_params."
+        )
+
+    return out
+
+
+# ------------------------------------------------------------
+# Plot function: top-N clusters only (fast with LineCollection)
+# ------------------------------------------------------------
+
+def plot_flow_topN_clean_py(city_id,
+                            prepared,
+                            labels_dbscan_style,
+                            algo_name="HDBSCAN",
+                            noise_label=0,
+                            out_dir="plots_flows_top3",
+                            top_n_clusters=3,
+                            sample_n_segments_top=25000,
+                            seed=1,
+                            show_plot=True):
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = prepared[city_id]["city_clean"]
+    req = ["x_o", "y_o", "x_d", "y_d"]
+    missing = [c for c in req if c not in df.columns]
+    if missing:
+        raise ValueError(f"{city_id}: Missing columns in city_clean: {missing}")
+
+    labels = np.asarray(labels_dbscan_style, dtype=int)
+    if labels.shape[0] != df.shape[0]:
+        raise ValueError(
+            f"{city_id}: labels length != nrow(city_clean) | labels={labels.shape[0]} rows={df.shape[0]}"
+        )
+
+    # compute top clusters by size excluding noise
+    cl = labels
+    cl_nonnoise = cl[(cl != noise_label) & np.isfinite(cl)]
+    if cl_nonnoise.size == 0:
+        print(f"WARNING: No non-noise clusters for {city_id} ({algo_name}).")
+        return None
+
+    uniq, cnt = np.unique(cl_nonnoise, return_counts=True)
+    order = np.argsort(-cnt)
+    top_ids = uniq[order][:top_n_clusters].astype(int)
+
+    # filter to top clusters
+    mask_top = np.isin(cl, top_ids)
+    df_top = df.loc[mask_top, ["x_o", "y_o", "x_d", "y_d"]].copy()
+    cl_top = cl[mask_top]
+
+    # sample segments for readability
+    rng = np.random.default_rng(seed)
+    n_top = df_top.shape[0]
+    if n_top > sample_n_segments_top:
+        idx = rng.choice(n_top, size=sample_n_segments_top, replace=False)
+        df_top = df_top.iloc[idx, :]
+        cl_top = cl_top[idx]
+
+    # build line segments (N,2,2)
+    segs = np.stack(
+        [df_top[["x_o", "y_o"]].to_numpy(dtype=float),
+         df_top[["x_d", "y_d"]].to_numpy(dtype=float)],
+        axis=1
+    )
+
+    # map cluster -> 0..(top_n-1) for colors (let matplotlib choose automatically)
+    top_ids_list = top_ids.tolist()
+    cl_idx = np.array([top_ids_list.index(int(c)) for c in cl_top], dtype=int)
+
+    fig, ax = plt.subplots(figsize=(9, 7.5))
+    lc = LineCollection(segs, linewidths=0.30, alpha=0.28)
+    lc.set_array(cl_idx)  # colormap indices
+    ax.add_collection(lc)
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(f"{algo_name} — Top {top_n_clusters} clusters — {city_id.upper()}", fontweight="bold")
+    ax.set_xlabel("UTM Easting (m)")
+    ax.set_ylabel("UTM Northing (m)")
+    ax.autoscale()
+
+    # colorbar with cluster ids
+    cbar = fig.colorbar(lc, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Cluster (top-N)")
+    # tick labels: show actual cluster ids
+    cbar.set_ticks(np.arange(len(top_ids)))
+    cbar.set_ticklabels([str(int(x)) for x in top_ids])
+
+    ax.grid(True, alpha=0.25)
+
+    f_out = os.path.join(out_dir, f"flows_{algo_name}_{city_id}_top{top_n_clusters}.png")
+    plt.savefig(f_out, dpi=300, bbox_inches="tight")
+
+    if show_plot:
+        plt.show()
+    plt.close(fig)
+
+    return {"file": f_out, "top_cluster_ids": top_ids.tolist()}
+
+
+# ------------------------------------------------------------
+# Run plots for all cities using selected HDBSCAN params
+# ------------------------------------------------------------
+
+selected_params_hdb = get_hdbscan_selected_params(preferred="knee_full")
+
+for city_id in prepared_plot.keys():
+
+    p = selected_params_hdb[city_id]
+    X = prepared_plot[city_id]["X_scaled"]
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=int(p["min_cluster_size"]),
+        min_samples=int(p["min_samples"]),
+        metric="euclidean",
+        cluster_selection_method="eom",
+        core_dist_n_jobs=1
+    )
+
+    labels = clusterer.fit_predict(X).astype(int)  # -1 noise
+    labels_dbscan_style = np.where(labels == -1, 0, labels + 1)
+
+    out = plot_flow_topN_clean_py(
+        city_id=city_id,
+        prepared=prepared_plot,
+        labels_dbscan_style=labels_dbscan_style,
+        algo_name="HDBSCAN",
+        noise_label=0,
+        out_dir="plots_flows_top3",
+        top_n_clusters=3,
+        sample_n_segments_top=25000,
+        seed=1,
+        show_plot=True
+    )
+
+    if out is not None:
+        print(f"{city_id} | saved:", out["file"], "| top clusters:", out["top_cluster_ids"])
