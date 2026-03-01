@@ -17,19 +17,27 @@ from os import PathLike
 import os
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
+import importlib
 
-import hdbscan
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyreadr
 from pyproj import Transformer
-from matplotlib.collections import LineCollection
 from sklearn.neighbors import NearestNeighbors
 
 
 NEEDED_COLS = ("start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat")
 FEATURE_COLS = ("x_o", "y_o", "dx", "dy")
+
+
+
+
+def _require_package(package_name: str, purpose: str):
+    if importlib.util.find_spec(package_name) is None:
+        raise ModuleNotFoundError(
+            f"Missing optional dependency '{package_name}' required for {purpose}. "
+            f"Install it first (e.g., call install_required_packages_colab())."
+        )
+    return importlib.import_module(package_name)
 
 
 @dataclass
@@ -51,6 +59,7 @@ class CityFeatureResult:
 def read_rds_as_df(rds_path: Path) -> pd.DataFrame:
     if not rds_path.exists():
         raise FileNotFoundError(f"File not found: {rds_path}")
+    pyreadr = _require_package("pyreadr", "reading .rds files")
     res = pyreadr.read_r(str(rds_path))
     if not res:
         raise ValueError(f"No objects found in RDS: {rds_path}")
@@ -230,7 +239,7 @@ def evaluate_hdbscan_grid(
         X_scaled = res.X_scaled
         n_total = int(X_scaled.shape[0])
         for k in min_samples_grid:
-            clusterer = hdbscan.HDBSCAN(
+            clusterer = _require_package("hdbscan", "HDBSCAN clustering").HDBSCAN(
                 min_samples=int(k),
                 min_cluster_size=int(min_cluster_size),
                 metric="euclidean",
@@ -281,7 +290,7 @@ def fit_final_hdbscan(
 
     for city_id, res in features.items():
         min_pts = int(per_city_params[city_id]["minPts"])
-        clusterer = hdbscan.HDBSCAN(
+        clusterer = _require_package("hdbscan", "HDBSCAN clustering").HDBSCAN(
             min_samples=min_pts,
             min_cluster_size=int(min_cluster_size),
             metric="euclidean",
@@ -534,7 +543,7 @@ def eval_hdbscan_params(
     cluster_selection_method: str = "eom",
     core_dist_n_jobs: int = 1,
 ) -> np.ndarray:
-    clusterer = hdbscan.HDBSCAN(
+    clusterer = _require_package("hdbscan", "HDBSCAN clustering").HDBSCAN(
         min_cluster_size=int(min_cluster_size),
         min_samples=int(min_samples),
         metric="euclidean",
@@ -824,7 +833,7 @@ def full_eval_one_hdb(
     if u_full.shape[0] != x_full.shape[0]:
         raise ValueError(f"{city_id}: trip_dirs_full rows != X_scaled rows")
 
-    clusterer = hdbscan.HDBSCAN(
+    clusterer = _require_package("hdbscan", "HDBSCAN clustering").HDBSCAN(
         min_cluster_size=int(min_cluster_size),
         min_samples=int(min_samples),
         metric="euclidean",
@@ -1133,7 +1142,11 @@ def plot_flow_topn_clean(
     sample_n_segments_top: int = 25_000,
     seed: int = 1,
     show_plot: bool = True,
-) -> Optional[Dict[str, object]]:
+ ) -> Optional[Dict[str, object]]:
+    plt = _require_package("matplotlib.pyplot", "plotting flow maps")
+    line_collection = _require_package("matplotlib.collections", "plotting flow maps")
+    LineCollection = line_collection.LineCollection
+
     os.makedirs(out_dir, exist_ok=True)
     req = ["x_o", "y_o", "x_d", "y_d"]
     missing = [c for c in req if c not in city_df.columns]
@@ -1352,6 +1365,8 @@ if __name__ == "__main__":
 
     print("\n=== Colab install helper ===")
     print("Call install_required_packages_colab() once in Colab before running pipeline.")
+
+    plt = _require_package("matplotlib.pyplot", "plotting diagnostics in __main__")
 
     outputs = run_pipeline(city_files=CITY_FILES, run_nsga2=True)
 
