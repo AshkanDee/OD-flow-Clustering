@@ -1,7 +1,5 @@
-# Tidy OD-flow clustering pipeline (DBSCAN + SNN)
+# OD-flow clustering pipeline (DBSCAN + SNN)
 # ------------------------------------------------
-# This script consolidates shared logic that was previously duplicated
-# across Colab blocks and keeps city datasets separate throughout.
 
 # -------------------------
 # 0) Package setup
@@ -2128,3 +2126,4 @@ if (isTRUE(RUN_PIPELINE_NOW)) {
     print_all_tables = TRUE
   )
 }
+
