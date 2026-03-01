@@ -136,6 +136,54 @@ prepare_feature_matrices <- function(city_data, feature_cols = c("x_o", "y_o", "
   out
 }
 
+
+
+# -------------------------
+# Quick start: load city datasets first
+# -------------------------
+# 1) Define your city files (edit paths):
+# city_files <- list(
+#   berlin  = "dt_bolt_berlin_06_05.rds",
+#   cologne = "dt_voi_cologne_06_05.rds",
+#   munich  = "dt_voi_munich_06_05.rds"
+# )
+#
+# 2) Initialize core objects used by all later steps:
+# init <- initialize_pipeline_state(city_files)
+# prepared_od <- init$prepared_od
+# city_data <- init$city_data
+# prepared <- init$prepared
+# cleaning_summary <- init$cleaning_summary
+# print(cleaning_summary)
+
+initialize_pipeline_state <- function(city_files,
+                                      needed = c("start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat"),
+                                      feature_cols = c("x_o", "y_o", "dx", "dy")) {
+  if (is.null(city_files) || length(city_files) == 0) {
+    stop("initialize_pipeline_state: `city_files` must be a non-empty named list of RDS paths.")
+  }
+  if (is.null(names(city_files)) || any(names(city_files) == "")) {
+    stop("initialize_pipeline_state: `city_files` must be named (e.g., berlin, cologne, munich).")
+  }
+
+  missing_paths <- city_files[!file.exists(unlist(city_files))]
+  if (length(missing_paths) > 0) {
+    stop("initialize_pipeline_state: missing files -> ", paste(unname(missing_paths), collapse = ", "))
+  }
+
+  stage0 <- prepare_all_cities(city_files = city_files, needed = needed)
+  prepared_od <- stage0$prepared
+  city_data <- build_city_data(prepared_od)
+  prepared <- prepare_feature_matrices(city_data, feature_cols = feature_cols)
+
+  list(
+    prepared_od = prepared_od,
+    city_data = city_data,
+    prepared = prepared,
+    cleaning_summary = stage0$cleaning_summary
+  )
+}
+
 # -------------------------
 # 3) Diagnostics helpers
 # -------------------------
@@ -329,10 +377,8 @@ run_snn_grid_search <- function(prepared, k_grid_snn, make_snn_threshold_grid, m
 run_pipeline <- function(city_files) {
   setup_packages()
 
-  stage0 <- prepare_all_cities(city_files)
-  prepared_od <- stage0$prepared
-  city_data <- build_city_data(prepared_od)
-  prepared <- prepare_feature_matrices(city_data)
+  init <- initialize_pipeline_state(city_files)
+  prepared <- init$prepared
 
   # Suggested search space from your original pipeline
   eps_grid <- seq(0.08, 0.40, by = 0.02)
@@ -349,7 +395,9 @@ run_pipeline <- function(city_files) {
   grid_df_snn <- run_snn_grid_search(prepared, k_grid_snn, make_snn_threshold_grid, minPts_grid_snn)
 
   list(
-    cleaning_summary = stage0$cleaning_summary,
+    cleaning_summary = init$cleaning_summary,
+    prepared_od = init$prepared_od,
+    city_data = init$city_data,
     prepared = prepared,
     grid_df_dbscan = grid_df_dbscan,
     grid_df_snn = grid_df_snn
@@ -1826,3 +1874,174 @@ run_and_plot_selected_flows <- function(prepared_plot,
 
   list(dbscan = out_dbscan, snn = out_snn)
 }
+
+# -------------------------
+# 9) End-to-end verbose runner (prints tables/plots like notebook workflow)
+# -------------------------
+run_pipeline_verbose <- function(city_files,
+                                 dbscan_params = list(
+                                   berlin = list(minPts = 20, eps = 0.200),
+                                   munich = list(minPts = 20, eps = 0.200),
+                                   cologne = list(minPts = 10, eps = 0.250)
+                                 ),
+                                 snn_params = list(
+                                   berlin = list(k = 20, snn_threshold = 8, minPts = 12),
+                                   munich = list(k = 30, snn_threshold = 11, minPts = 18),
+                                   cologne = list(k = 15, snn_threshold = 6, minPts = 10)
+                                 ),
+                                 popsize = 100,
+                                 generations = 50,
+                                 n_sub = 10000L,
+                                 show_plots = TRUE,
+                                 print_all_tables = TRUE) {
+  setup_packages(c("data.table", "sf", "dbscan", "dplyr", "ggplot2", "mco"))
+
+  # Start state
+  init <- initialize_pipeline_state(city_files)
+  prepared <- init$prepared
+
+  cat("\n===== CLEANING SUMMARY =====\n")
+  print(init$cleaning_summary)
+
+  # Grid searches
+  eps_grid <- seq(0.08, 0.40, by = 0.02)
+  minPts_grid_dbscan <- c(10, 20, 30)
+  k_grid_snn <- c(10, 20, 30)
+  make_snn_threshold_grid <- function(k) {
+    thr <- round(seq(0.35 * k, 0.65 * k, length.out = 6))
+    unique(pmax(2L, pmin(k - 1L, as.integer(thr))))
+  }
+  minPts_grid_snn <- c(15, 18, 20, 25)
+
+  grid_df_dbscan <- run_dbscan_grid_search(prepared, eps_grid, minPts_grid_dbscan)
+  grid_df_snn <- run_snn_grid_search(prepared, k_grid_snn, make_snn_threshold_grid, minPts_grid_snn)
+
+  cat("\n===== DBSCAN GRID RESULTS =====\n")
+  print(grid_df_dbscan)
+  cat("\n===== SNN GRID RESULTS =====\n")
+  print(grid_df_snn)
+
+  # Final labels + summaries
+  prepared_db <- apply_final_dbscan(prepared, dbscan_params = dbscan_params)
+  prepared_snn <- apply_final_snn(prepared, snn_params = snn_params)
+
+  cat("\n===== DBSCAN CLUSTER SIZE CHECK =====\n")
+  verify_cluster_sizes(prepared_db)
+  cat("\n===== SNN CLUSTER SIZE CHECK =====\n")
+  verify_cluster_sizes(prepared_snn)
+
+  cat("\n===== DBSCAN CLUSTER SUMMARIES =====\n")
+  cluster_summaries_db <- build_cluster_summaries(prepared_db)
+  cat("\n===== SNN CLUSTER SUMMARIES =====\n")
+  cluster_summaries_snn <- build_cluster_summaries(prepared_snn)
+
+  # NSGA-II on shared subsample
+  trip_dirs_full <- build_trip_dirs_full(prepared)
+  opt <- build_opt_subsample(prepared, trip_dirs_full, n_sub = n_sub, seed = 1)
+
+  db_nsga <- run_nsga_dbscan(prepared, opt$data_for_opt, opt$trip_dirs_for_opt,
+                             popsize = popsize, generations = generations)
+  pareto_dbscan <- build_pareto_dbscan(db_nsga$nsga_dbscan,
+                                       eps_min = db_nsga$eps_min,
+                                       eps_max = db_nsga$eps_max,
+                                       eps_step = db_nsga$eps_step,
+                                       eps_digits = db_nsga$eps_digits,
+                                       minPts_allowed = db_nsga$minPts_allowed)
+  knee_dbscan <- select_knee_points(pareto_dbscan)
+
+  snn_nsga <- run_nsga_snn(prepared, opt$data_for_opt, opt$trip_dirs_for_opt,
+                           popsize = popsize, generations = generations)
+  pareto_snn <- build_pareto_snn(snn_nsga$nsga_snn,
+                                 k_allowed = snn_nsga$k_allowed,
+                                 thr_allowed = snn_nsga$thr_allowed,
+                                 minPts_allowed = snn_nsga$minPts_allowed)
+  knee_snn <- select_knee_points(pareto_snn)
+
+  if (isTRUE(print_all_tables)) {
+    cat("\n===== ALL DBSCAN PARETO TABLES =====\n")
+    print_all_pareto(pareto_dbscan, algo = "DBSCAN")
+    cat("\n===== ALL SNN PARETO TABLES =====\n")
+    print_all_pareto(pareto_snn, algo = "SNN")
+  }
+
+  # Full-data validations
+  valid_db <- validate_pareto_dbscan_full(prepared, pareto_dbscan, knee_dbscan, dbscan_params = dbscan_params)
+  valid_snn <- validate_pareto_snn_full(prepared, pareto_snn, knee_snn, snn_params = snn_params)
+
+  cat("\n===== DBSCAN FULL VALIDATION =====\n")
+  print(valid_db$full_validated_dbscan_df)
+  cat("\n===== DBSCAN EXPERT vs KNEE_FULL =====\n")
+  print(valid_db$compare_dbscan)
+
+  cat("\n===== SNN FULL VALIDATION =====\n")
+  print(valid_snn$full_validated_snn_df)
+  cat("\n===== SNN EXPERT vs KNEE_FULL =====\n")
+  print(valid_snn$compare_snn)
+
+  # Hypervolume DBSCAN vs SNN
+  hv <- compute_hv_results(pareto_by_group = list(DBSCAN = pareto_dbscan, SNN = pareto_snn),
+                           ref_min = c(1.05, 1.05),
+                           group_col = "algorithm",
+                           city_col = "city")
+  cat("\n===== HYPERVOLUME RESULTS (DBSCAN vs SNN) =====\n")
+  print(hv$hv_results)
+
+  if (isTRUE(show_plots) && nrow(hv$hv_summary_df) > 0) {
+    plot_hv_summaries(hv$hv_results, hv$hv_summary_df)
+    for (city_id in names(pareto_dbscan)) {
+      if (!is.null(pareto_dbscan[[city_id]]) && nrow(pareto_dbscan[[city_id]]) > 0) {
+        print(plot_pareto(pareto_dbscan[[city_id]], knee = knee_dbscan[[city_id]], city_name = city_id,
+                          title_prefix = "[DBSCAN] Pareto front (subsample)"))
+      }
+    }
+    for (city_id in names(pareto_snn)) {
+      if (!is.null(pareto_snn[[city_id]]) && nrow(pareto_snn[[city_id]]) > 0) {
+        print(plot_pareto(pareto_snn[[city_id]], knee = knee_snn[[city_id]], city_name = city_id,
+                          title_prefix = "[SNN] Pareto front (subsample)"))
+      }
+    }
+  }
+
+  # Optional null-test + flow plots
+  null_out <- run_dbscan_null_test(prepared_real = prepared, n_sub = n_sub, popsize = popsize, generations = generations)
+  cat("\n===== NULL TEST HV (REAL vs RAND) =====\n")
+  print(null_out$hv_results_tag)
+
+  selected_params_dbscan <- get_dbscan_selected_params(prepared, knee_full_dbscan = valid_db$knee_full_dbscan, dbscan_params = dbscan_params)
+  selected_params_snn <- get_snn_selected_params(prepared, knee_full_snn = valid_snn$knee_full_snn, snn_params = snn_params)
+  flow_plots <- run_and_plot_selected_flows(
+    prepared_plot = prepared,
+    selected_params_dbscan = selected_params_dbscan,
+    selected_params_snn = selected_params_snn,
+    out_dir = "plots_flows_top3",
+    top_n_clusters = 3,
+    show_background = FALSE,
+    show_plots = show_plots
+  )
+
+  list(
+    init = init,
+    prepared = prepared,
+    grid_df_dbscan = grid_df_dbscan,
+    grid_df_snn = grid_df_snn,
+    cluster_summaries_db = cluster_summaries_db,
+    cluster_summaries_snn = cluster_summaries_snn,
+    pareto_dbscan = pareto_dbscan,
+    pareto_snn = pareto_snn,
+    knee_dbscan = knee_dbscan,
+    knee_snn = knee_snn,
+    valid_db = valid_db,
+    valid_snn = valid_snn,
+    hv = hv,
+    null_out = null_out,
+    flow_plots = flow_plots
+  )
+}
+
+# Example full-report run:
+# city_files <- list(
+#   berlin  = "dt_bolt_berlin_06_05.rds",
+#   cologne = "dt_voi_cologne_06_05.rds",
+#   munich  = "dt_voi_munich_06_05.rds"
+# )
+# report <- run_pipeline_verbose(city_files, show_plots = TRUE, print_all_tables = TRUE)
