@@ -1,3 +1,4 @@
+# Please if dataset files are not in your current working directory, change them to your path, codes in line 2091 - 2096
 # Tidy OD-flow clustering pipeline (DBSCAN + SNN)
 # ------------------------------------------------
 # This script consolidates shared logic that was previously duplicated
@@ -138,6 +139,42 @@ prepare_feature_matrices <- function(city_data, feature_cols = c("x_o", "y_o", "
 
 
 
+
+
+# Default dataset mapping used when city_files is omitted
+default_city_files <- function(base_dir = ".") {
+  list(
+    berlin = file.path(base_dir, "dt_bolt_berlin_06_05.rds"),
+    cologne = file.path(base_dir, "dt_voi_cologne_06_05.rds"),
+    munich = file.path(base_dir, "dt_voi_munich_06_05.rds")
+  )
+}
+
+resolve_city_files <- function(city_files = NULL, base_dir = ".", extra_dirs = NULL) {
+  if (!is.null(city_files)) return(city_files)
+
+  candidate_dirs <- unique(c(base_dir, getwd(), extra_dirs))
+  candidate_dirs <- candidate_dirs[!is.na(candidate_dirs) & nzchar(candidate_dirs)]
+
+  for (d in candidate_dirs) {
+    guessed <- default_city_files(base_dir = d)
+    if (all(file.exists(unlist(guessed)))) {
+      message("Using default city_files from: ", normalizePath(d, winslash = "/", mustWork = FALSE))
+      return(guessed)
+    }
+  }
+
+  stop(
+    "city_files not provided and default files were not all found.
+",
+    "Checked directories: ", paste(normalizePath(candidate_dirs, winslash = "/", mustWork = FALSE), collapse = " | "), "
+",
+    "Provide explicit paths, e.g.:
+",
+    "city_files <- list(berlin='.../dt_bolt_berlin_06_05.rds', cologne='.../dt_voi_cologne_06_05.rds', munich='.../dt_voi_munich_06_05.rds')"
+  )
+}
+
 # -------------------------
 # Quick start: load city datasets first
 # -------------------------
@@ -149,19 +186,19 @@ prepare_feature_matrices <- function(city_data, feature_cols = c("x_o", "y_o", "
 # )
 #
 # 2) Initialize core objects used by all later steps:
-# init <- initialize_pipeline_state(city_files)
+# init <- initialize_pipeline_state(city_files)  # or initialize_pipeline_state() if default files exist in wd
 # prepared_od <- init$prepared_od
 # city_data <- init$city_data
 # prepared <- init$prepared
 # cleaning_summary <- init$cleaning_summary
 # print(cleaning_summary)
 
-initialize_pipeline_state <- function(city_files,
+initialize_pipeline_state <- function(city_files = NULL,
+                                      base_dir = ".",
                                       needed = c("start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat"),
                                       feature_cols = c("x_o", "y_o", "dx", "dy")) {
-  if (is.null(city_files) || length(city_files) == 0) {
-    stop("initialize_pipeline_state: `city_files` must be a non-empty named list of RDS paths.")
-  }
+  city_files <- resolve_city_files(city_files, base_dir = base_dir)
+
   if (is.null(names(city_files)) || any(names(city_files) == "")) {
     stop("initialize_pipeline_state: `city_files` must be named (e.g., berlin, cologne, munich).")
   }
@@ -374,10 +411,10 @@ run_snn_grid_search <- function(prepared, k_grid_snn, make_snn_threshold_grid, m
 # -------------------------
 # 5) End-to-end runner
 # -------------------------
-run_pipeline <- function(city_files) {
+run_pipeline <- function(city_files = NULL, base_dir = ".") {
   setup_packages()
 
-  init <- initialize_pipeline_state(city_files)
+  init <- initialize_pipeline_state(city_files, base_dir = base_dir)
   prepared <- init$prepared
 
   # Suggested search space from your original pipeline
@@ -1878,7 +1915,8 @@ run_and_plot_selected_flows <- function(prepared_plot,
 # -------------------------
 # 9) End-to-end verbose runner (prints tables/plots like notebook workflow)
 # -------------------------
-run_pipeline_verbose <- function(city_files,
+run_pipeline_verbose <- function(city_files = NULL,
+                                 base_dir = ".",
                                  dbscan_params = list(
                                    berlin = list(minPts = 20, eps = 0.200),
                                    munich = list(minPts = 20, eps = 0.200),
@@ -1897,7 +1935,7 @@ run_pipeline_verbose <- function(city_files,
   setup_packages(c("data.table", "sf", "dbscan", "dplyr", "ggplot2", "mco"))
 
   # Start state
-  init <- initialize_pipeline_state(city_files)
+  init <- initialize_pipeline_state(city_files, base_dir = base_dir)
   prepared <- init$prepared
 
   cat("\n===== CLEANING SUMMARY =====\n")
@@ -2038,10 +2076,33 @@ run_pipeline_verbose <- function(city_files,
   )
 }
 
-# Example full-report run:
+# Example full-report run (explicit city_files):
 # city_files <- list(
 #   berlin  = "dt_bolt_berlin_06_05.rds",
 #   cologne = "dt_voi_cologne_06_05.rds",
 #   munich  = "dt_voi_munich_06_05.rds"
 # )
 # report <- run_pipeline_verbose(city_files, show_plots = TRUE, print_all_tables = TRUE)
+
+
+# -------------------------
+# -------------------------
+# 10) RUN COMMAND (non-commented): shareable execution block
+# -------------------------
+# Your exact files (as requested):
+CITY_FILES <- list(
+  berlin = "dt_bolt_berlin_06_05.rds",
+  cologne = "dt_voi_cologne_06_05.rds",
+  munich = "dt_voi_munich_06_05.rds"
+)
+
+RUN_PIPELINE_NOW <- TRUE  # set FALSE if you only want function definitions
+
+if (isTRUE(RUN_PIPELINE_NOW)) {
+  init <- initialize_pipeline_state(city_files = CITY_FILES)
+  report <- run_pipeline_verbose(
+    city_files = CITY_FILES,
+    show_plots = interactive(),
+    print_all_tables = TRUE
+  )
+}
