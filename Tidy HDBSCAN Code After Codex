@@ -1190,6 +1190,26 @@ def plot_flow_topn_clean(
     return {"file": f_out, "top_cluster_ids": top_ids.tolist()}
 
 
+
+def install_required_packages_colab() -> None:
+    """Install required packages in Colab/Jupyter runtime."""
+    import subprocess
+    import sys
+
+    commands = [
+        [sys.executable, "-m", "pip", "install", "-q", "pyreadr", "pyproj", "pandas", "numpy"],
+        [sys.executable, "-m", "pip", "install", "-q", "scikit-learn", "hdbscan"],
+        [sys.executable, "-m", "pip", "install", "-q", "matplotlib"],
+        [sys.executable, "-m", "pip", "install", "-q", "pymoo"],
+    ]
+
+    for cmd in commands:
+        subprocess.check_call(cmd)
+
+    print("All required packages installed successfully.")
+
+
+
 def run_pipeline(
     city_files: Mapping[str, str],
     k_values_dbscan: Sequence[int] = (10, 20, 30, 50),
@@ -1330,18 +1350,85 @@ if __name__ == "__main__":
         "munich": "dt_voi_munich_06_05.rds",
     }
 
-    outputs = run_pipeline(city_files=CITY_FILES, run_nsga2=False)
+    print("\n=== Colab install helper ===")
+    print("Call install_required_packages_colab() once in Colab before running pipeline.")
+
+    outputs = run_pipeline(city_files=CITY_FILES, run_nsga2=True)
 
     print("\n=== Cleaning summary ===")
-    print(outputs["summary"])
+    print(outputs["summary"].to_string(index=False))
 
-    print("\n=== HDBSCAN grid (head) ===")
-    print(outputs["grid_df_hdbscan"].head())
+    print("\n=== kNN diagnostics ===")
+    print(outputs["knn_df"].to_string(index=False))
+
+    print("\n=== SNN diagnostics ===")
+    print(outputs["snn_df"].to_string(index=False))
+
+    print("\n=== HDBSCAN bounds ===")
+    print(outputs["hdb_bounds_df"].to_string(index=False))
+
+    print("\n=== HDBSCAN grid (full) ===")
+    print(outputs["grid_df_hdbscan"].to_string(index=False))
 
     print("\n=== Final clustering checks ===")
-    print(pd.DataFrame(outputs["clustering_checks"]).T)
+    print(pd.DataFrame(outputs["clustering_checks"]).T.to_string())
+
+    print("\n=== Objective sanity checks ===")
+    print(outputs["sanity_eval_df"].to_string(index=False))
 
     for city_id, tbl in outputs["final_city_tables"].items():
         n_clusters = int(tbl.loc[tbl["cluster"] != 0, "cluster"].nunique())
         noise_pct = 100.0 * float((tbl["cluster"] == 0).mean())
         print(f"FINAL | {city_id} | clusters={n_clusters} | noise%={noise_pct:.2f}")
+
+    if "nsga2" in outputs:
+        nsga2_out = outputs["nsga2"]
+        print("\n=== Pareto tables (HDBSCAN) ===")
+        for city_id, df in nsga2_out["pareto_tables_hdb"].items():
+            print(f"\nCITY: {city_id.upper()} | N Pareto points: {len(df)}")
+            print(df.sort_values(["coverage", "dir_cohesion"]).to_string(index=False) if len(df) else "No Pareto rows")
+
+            if len(df):
+                plt.figure()
+                plt.scatter(df["coverage"], df["dir_cohesion"], s=20, alpha=0.8)
+                knee = nsga2_out["knee_solutions_hdb"].get(city_id, pd.DataFrame())
+                if isinstance(knee, pd.DataFrame) and len(knee):
+                    plt.scatter(knee["coverage"], knee["dir_cohesion"], s=120, marker="x")
+                plt.title(f"HDBSCAN Pareto — {city_id.upper()}")
+                plt.xlabel("Coverage")
+                plt.ylabel("Directional cohesion")
+                plt.grid(True)
+                plt.show()
+
+    if "step15_validation" in outputs:
+        step15 = outputs["step15_validation"]
+        print("\n=== FULL validation of selected Pareto configs ===")
+        print(step15["full_validated_hdb_df"].to_string(index=False) if len(step15["full_validated_hdb_df"]) else "No full validation rows")
+        print("\n=== EXPERT vs KNEE_FULL ===")
+        print(step15["expert_vs_knee_full"].to_string(index=False) if len(step15["expert_vs_knee_full"]) else "No comparison rows")
+
+    if "step16_hv" in outputs:
+        hv = outputs["step16_hv"]
+        print("\n=== Hypervolume results ===")
+        print(hv["hv_results"].to_string(index=False) if len(hv["hv_results"]) else "No HV rows")
+
+        if len(hv["hv_summary"]):
+            hv_summary = hv["hv_summary"]
+            cities = sorted(hv_summary["city"].unique().tolist())
+            algos = sorted(hv_summary["algorithm"].unique().tolist())
+            x = np.arange(len(cities))
+            width = 0.8 / max(1, len(algos))
+
+            plt.figure()
+            for i, algo in enumerate(algos):
+                y = []
+                for c in cities:
+                    r = hv_summary[(hv_summary["city"] == c) & (hv_summary["algorithm"] == algo)]
+                    y.append(float(r["hv_unit"].iloc[0]) if len(r) else np.nan)
+                plt.bar(x + i * width, y, width=width, label=algo)
+            plt.xticks(x + width * (len(algos) - 1) / 2, [c.upper() for c in cities])
+            plt.ylabel("Hypervolume (unit-scaled)")
+            plt.title("Unit-scaled hypervolume by city and algorithm")
+            plt.legend()
+            plt.grid(axis="y", alpha=0.3)
+            plt.show()
