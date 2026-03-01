@@ -1,4 +1,4 @@
-# Please if dataset files are not in your current working directory, change them to your path, codes in line 2091 - 2096
+# Please if dataset files are not in your current working directory, change them to your path, codes in line 2109
 # Tidy OD-flow clustering pipeline (DBSCAN + SNN)
 # ------------------------------------------------
 # This script consolidates shared logic that was previously duplicated
@@ -7,10 +7,29 @@
 # -------------------------
 # 0) Package setup
 # -------------------------
-setup_packages <- function(pkgs = c("data.table", "sf", "dbscan", "dplyr", "ggplot2")) {
+setup_packages <- function(pkgs = c("data.table", "sf", "dbscan", "dplyr", "ggplot2"),
+                           repos = "https://cloud.r-project.org") {
+  options(repos = c(CRAN = repos))
+
   missing <- pkgs[!vapply(pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]
-  if (length(missing) > 0) install.packages(missing)
-  invisible(lapply(pkgs, library, character.only = TRUE))
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    install.packages(missing, dependencies = TRUE)
+  }
+
+  still_missing <- pkgs[!vapply(pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]
+  if (length(still_missing) > 0) {
+    stop(
+      "Failed to install/load required packages: ", paste(still_missing, collapse = ", "),
+      "\nInstall them manually, then rerun."
+    )
+  }
+
+  for (pkg in pkgs) {
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE))
+  }
+
+  invisible(TRUE)
 }
 
 # -------------------------
