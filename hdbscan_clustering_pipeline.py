@@ -1,5 +1,5 @@
 """Tidy HDBSCAN pipeline for per-city OD-flow clustering.
-
+For changing path, please know that datasets are loaded in line 1430
 This script refactors the notebook-style workflow into reusable functions:
 1) Load and clean OD data from RDS files.
 2) Build feature matrices and z-score scaling.
@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
 import importlib
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -31,12 +33,71 @@ FEATURE_COLS = ("x_o", "y_o", "dx", "dy")
 
 
 
-def _require_package(package_name: str, purpose: str):
-    if importlib.util.find_spec(package_name) is None:
-        raise ModuleNotFoundError(
-            f"Missing optional dependency '{package_name}' required for {purpose}. "
-            f"Install it first (e.g., call install_required_packages_colab())."
-        )
+_REQUIRED_BASE_PACKAGES = [
+    "numpy",
+    "pandas",
+    "pyproj",
+    "sklearn",
+    "pyreadr",
+    "hdbscan",
+]
+
+_REQUIRED_NSGA2_PACKAGES = [
+    "pymoo",
+]
+
+_REQUIRED_PLOTTING_PACKAGES = [
+    "matplotlib",
+]
+
+
+def ensure_runtime_dependencies(
+    include_nsga2: bool = False,
+    include_plotting: bool = False,
+    auto_install_in_notebook: bool = True,
+) -> None:
+    """One-shot dependency preflight for the pipeline."""
+    needed = list(_REQUIRED_BASE_PACKAGES)
+    if include_nsga2:
+        needed.extend(_REQUIRED_NSGA2_PACKAGES)
+    if include_plotting:
+        needed.extend(_REQUIRED_PLOTTING_PACKAGES)
+
+    for pkg in needed:
+        _require_package(pkg, "pipeline runtime", auto_install_in_notebook=auto_install_in_notebook)
+
+
+
+def _in_notebook_runtime() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+
+        return get_ipython() is not None
+    except Exception:
+        return False
+
+
+def _has_module(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _require_package(package_name: str, purpose: str, auto_install_in_notebook: bool = True):
+    """Import dependency; optionally auto-install in notebook runtimes if missing."""
+    pip_name = package_name.split(".")[0]
+
+    if not _has_module(package_name):
+        if auto_install_in_notebook and _in_notebook_runtime():
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pip_name])
+
+        if not _has_module(package_name):
+            raise ModuleNotFoundError(
+                f"Missing optional dependency '{package_name}' required for {purpose}. "
+                f"Install it with `pip install {pip_name}` or call install_required_packages_colab() in notebooks."
+            )
+
     return importlib.import_module(package_name)
 
 
@@ -653,16 +714,13 @@ def run_nsga2_hdbscan(
     cluster_selection_method: str = "eom",
     core_dist_n_jobs: int = 1,
 ) -> Dict[str, object]:
-    try:
-        from pymoo.algorithms.moo.nsga2 import NSGA2
-        from pymoo.core.problem import ElementwiseProblem
-        from pymoo.operators.crossover.sbx import SBX
-        from pymoo.operators.mutation.pm import PM
-        from pymoo.operators.sampling.rnd import FloatRandomSampling
-        from pymoo.optimize import minimize
-        from pymoo.termination import get_termination
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError("run_nsga2_hdbscan requires pymoo. Install with: pip install pymoo") from exc
+    NSGA2 = _require_package("pymoo.algorithms.moo.nsga2", "NSGA-II optimization").NSGA2
+    ElementwiseProblem = _require_package("pymoo.core.problem", "NSGA-II optimization").ElementwiseProblem
+    SBX = _require_package("pymoo.operators.crossover.sbx", "NSGA-II optimization").SBX
+    PM = _require_package("pymoo.operators.mutation.pm", "NSGA-II optimization").PM
+    FloatRandomSampling = _require_package("pymoo.operators.sampling.rnd", "NSGA-II optimization").FloatRandomSampling
+    minimize = _require_package("pymoo.optimize", "NSGA-II optimization").minimize
+    get_termination = _require_package("pymoo.termination", "NSGA-II optimization").get_termination
 
     data_for_opt, trip_dirs_for_opt, sub_idx_by_city = subsample_for_optimization(
         features=features,
@@ -1204,6 +1262,11 @@ def plot_flow_topn_clean(
 
 
 
+def install_required_packages() -> None:
+    """Install required packages in a regular Python environment."""
+    install_required_packages_colab()
+
+
 def install_required_packages_colab() -> None:
     """Install required packages in Colab/Jupyter runtime."""
     import subprocess
@@ -1232,6 +1295,7 @@ def run_pipeline(
     n_sub: int = 10_000,
     final_hdbscan_params: Optional[Mapping[str, Mapping[str, int]]] = None,
     run_nsga2: bool = False,
+    preflight_dependencies: bool = True,
 ) -> Dict[str, object]:
     if final_hdbscan_params is None:
         final_hdbscan_params = {
@@ -1239,6 +1303,13 @@ def run_pipeline(
             "munich": {"minPts": 45},
             "cologne": {"minPts": 50},
         }
+
+    if preflight_dependencies:
+        ensure_runtime_dependencies(
+            include_nsga2=run_nsga2,
+            include_plotting=False,
+            auto_install_in_notebook=True,
+        )
 
     prepared = {
         city_id: prep_city_od(city_id=city_id, rds_path=Path(path))
@@ -1364,11 +1435,12 @@ if __name__ == "__main__":
     }
 
     print("\n=== Colab install helper ===")
-    print("Call install_required_packages_colab() once in Colab before running pipeline.")
+    print("Call install_required_packages() (or install_required_packages_colab() in Colab) before running pipeline.")
 
+    ensure_runtime_dependencies(include_nsga2=True, include_plotting=True, auto_install_in_notebook=True)
     plt = _require_package("matplotlib.pyplot", "plotting diagnostics in __main__")
 
-    outputs = run_pipeline(city_files=CITY_FILES, run_nsga2=True)
+    outputs = run_pipeline(city_files=CITY_FILES, run_nsga2=True, preflight_dependencies=False)
 
     print("\n=== Cleaning summary ===")
     print(outputs["summary"].to_string(index=False))
@@ -1447,3 +1519,43 @@ if __name__ == "__main__":
             plt.legend()
             plt.grid(axis="y", alpha=0.3)
             plt.show()
+
+    print("\n=== HDBSCAN segment maps (top-3 clusters) ===")
+    nsga2_out = outputs.get("nsga2", {})
+    step15 = outputs.get("step15_validation", {})
+    selected_params_hdb = get_hdbscan_selected_params(
+        city_ids=list(outputs["features"].keys()),
+        knee_full_hdb=step15.get("knee_full_hdb", pd.DataFrame()) if isinstance(step15, dict) else pd.DataFrame(),
+        knee_solutions_hdb=nsga2_out.get("knee_solutions_hdb", {}) if isinstance(nsga2_out, dict) else {},
+        hdbscan_params={"berlin": {"minPts": 50}, "munich": {"minPts": 45}, "cologne": {"minPts": 50}},
+        min_cluster_size_fixed=20,
+    )
+
+    for city_id, params in selected_params_hdb.items():
+        x_city = outputs["features"][city_id].X_scaled
+        clusterer = _require_package("hdbscan", "HDBSCAN clustering").HDBSCAN(
+            min_cluster_size=int(params["min_cluster_size"]),
+            min_samples=int(params["min_samples"]),
+            metric="euclidean",
+            cluster_selection_method="eom",
+            core_dist_n_jobs=1,
+        )
+        labels = clusterer.fit_predict(x_city).astype(int)
+        labels_dbscan_style = np.where(labels == -1, 0, labels + 1)
+
+        flow_plot = plot_flow_topn_clean(
+            city_df=outputs["final_city_tables"][city_id],
+            labels_dbscan_style=labels_dbscan_style,
+            city_id=city_id,
+            algo_name="HDBSCAN",
+            noise_label=0,
+            out_dir="plots_flows_top3",
+            top_n_clusters=3,
+            sample_n_segments_top=25_000,
+            seed=1,
+            show_plot=True,
+        )
+        if flow_plot is None:
+            print(f"{city_id.upper()}: no non-noise clusters to plot")
+        else:
+            print(f"{city_id.upper()}: saved {flow_plot['file']} | top clusters: {flow_plot['top_cluster_ids']}")
