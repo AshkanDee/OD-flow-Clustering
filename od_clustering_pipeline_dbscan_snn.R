@@ -1,4 +1,3 @@
-# Please if dataset files are not in your current working directory, change them to your path, codes in line 166 and 2109
 # Tidy OD-flow clustering pipeline (DBSCAN + SNN)
 # ------------------------------------------------
 # This script consolidates shared logic that was previously duplicated
@@ -216,6 +215,9 @@ initialize_pipeline_state <- function(city_files = NULL,
                                       base_dir = ".",
                                       needed = c("start_loc_lon", "start_loc_lat", "dest_loc_lon", "dest_loc_lat"),
                                       feature_cols = c("x_o", "y_o", "dx", "dy")) {
+  # Ensure required preprocessing packages are available before any sf/data.table calls.
+  setup_packages(c("data.table", "sf"))
+
   city_files <- resolve_city_files(city_files, base_dir = base_dir)
 
   if (is.null(names(city_files)) || any(names(city_files) == "")) {
@@ -473,7 +475,7 @@ run_pipeline <- function(city_files = NULL, base_dir = ".") {
 
 
 # -------------------------
-# 6) Final per-city runs + post-clustering analysis + objective functions (Steps 7-12)
+# 6) Final per-city runs + post-clustering analysis (Steps 7-12)
 # -------------------------
 
 apply_final_dbscan <- function(prepared,
@@ -2118,6 +2120,7 @@ CITY_FILES <- list(
 RUN_PIPELINE_NOW <- TRUE  # set FALSE if you only want function definitions
 
 if (isTRUE(RUN_PIPELINE_NOW)) {
+  setup_packages(c("data.table", "sf", "dbscan", "dplyr", "ggplot2", "mco"))
   init <- initialize_pipeline_state(city_files = CITY_FILES)
   report <- run_pipeline_verbose(
     city_files = CITY_FILES,
@@ -2125,5 +2128,3 @@ if (isTRUE(RUN_PIPELINE_NOW)) {
     print_all_tables = TRUE
   )
 }
-
-
